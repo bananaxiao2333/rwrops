@@ -1,0 +1,15 @@
+[project]
+name = "rwrops"
+version = "0.1.0"
+description = "RWR Omni Parser System"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "bs4>=0.0.2",
+    "chardet>=7.4.0.post1",
+    "colorlog>=6.10.1",
+    "lxml>=6.0.2",
+    "pydantic>=2.12.5",
+    "tqdm>=4.67.3",
+    "PyYAML>=6.0",
+]
