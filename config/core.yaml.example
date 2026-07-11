@@ -1,5 +1,5 @@
 package_path:
-  - "/Users/bananaxiao/Library/Application\ Support/Steam/steamapps/common/RunningWithRifles/RunningWithRifles.app/Contents/Resources/media/packages/vanilla"
+  - "/Users/YOUR_USERNAME/Library/Application\ Support/Steam/steamapps/common/RunningWithRifles/RunningWithRifles.app/Contents/Resources/media/packages/vanilla"
   # - "C:\\Program Files (x86)\\Steam\\steamapps\\common\\RunningWithRifles\\media\\packages\\vanilla"
 output_format: "json"
 pretty_print: true
@@ -9,7 +9,7 @@ sort:
   enable: true
   primarykey: "key"
 plugin_paths:
-  # - "C:\\Users\\hongx\\Documents\\test_sub_plugins"
+  # - "C:\\Users\\YOUR_USERNAME\\Documents\\test_sub_plugins"
 
 exclude_patterns:
   - models
