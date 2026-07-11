@@ -12,6 +12,11 @@ wheels/
 # Virtual environments
 .venv
 
+# Config (keep examples only)
+config/*
+!config/*.example
+!config/*.dis
+
 *.log
 logs/
 vanilla/
