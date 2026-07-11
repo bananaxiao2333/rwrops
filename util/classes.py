@@ -99,6 +99,7 @@ class Config(BaseModel):
     output_format: str
     pretty_print: bool
     include_source: bool
+    generate_index_html: bool = True
     sort: SortConfig
 
     plugin_paths: List[str] = Field(default_factory=list)

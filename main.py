@@ -319,6 +319,21 @@ def main_procces(config: Config):
 
     Plogger.info(f"Wrote result.json + metadata.yaml + assets/ ({res_files_exported} files) to dist/")
 
+    # ── Generate index.html ──────────────────────────────────────────
+    if config.generate_index_html:
+        try:
+            from util.index_html import generate as generate_index
+            generate_index(
+                out_dir=out_dir,
+                to_dump=to_dump_rewritten,
+                entity_counts=entity_counts,
+                metadata=metadata,
+                asset_map=asset_map,
+            )
+            Plogger.info("Wrote index.html")
+        except Exception as e:
+            Plogger.warning(f"Failed to generate index.html: {e}")
+
 
 if __name__ == "__main__":
     logger.info("RWROPS requested | Fidelity Bravery Integrity")
