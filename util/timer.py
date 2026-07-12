@@ -2,7 +2,7 @@ import time
 from functools import wraps
 import logging
 
-logger = logging.getLogger("Timer")
+logger = logging.getLogger(__name__)
 
 
 def timer(func, desc: str = ""):

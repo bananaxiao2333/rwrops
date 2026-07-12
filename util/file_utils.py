@@ -7,7 +7,7 @@ import chardet
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-logger = logging.getLogger("File")
+logger = logging.getLogger(__name__)
 
 
 def file_reader(path: Path, size: int = -1) -> str:
@@ -15,7 +15,7 @@ def file_reader(path: Path, size: int = -1) -> str:
         r = file.read(size)
         f_charinfo = chardet.detect(r)
         encoding = f_charinfo['encoding']
-    # logger.debug(f"reading '{path}' in '{encoding}'")
+    logger.debug("reading '%s' (detected: %s)", path.name, encoding)
     with open(path, 'r', encoding=encoding, errors="replace") as file:
         return file.read(size)
 
