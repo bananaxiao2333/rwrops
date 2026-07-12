@@ -1,21 +1,25 @@
 """AS parser — deep command action extraction + exchange category parsing (no entity injection)."""
-import re, json, logging
+import json
+import logging
+import re
+import time
 from pathlib import Path
 
-logger = logging.getLogger("ASParser")
-
-CMD_SRC  = r"C:\Users\hongx\Documents\test_sub\scripts\trackers\basic_command_handler.as"
-EXCH_SRC = r"C:\Users\hongx\Documents\test_sub\scripts\gamemodes\invasion\item_delivery_configurator_invasion.as"
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════ command parser ═══════════════════════
 
 def parse_commands(path: Path) -> list:
     """Extract every command with its full action chain."""
+    logger.debug("reading commands from %s", path)
+    t0 = time.monotonic()
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.split('\n')
     results = []
     seen = set()
+
+    logger.debug("  %d lines, scanning for checkCommand patterns", len(lines))
 
     for i, line in enumerate(lines):
         m = re.search(r'checkCommand\(message,\s*"([^"]+)"\)', line)
@@ -23,6 +27,7 @@ def parse_commands(path: Path) -> list:
             continue
         name = m.group(1)
         if name in seen:
+            logger.debug("  duplicate command '%s' at line %d — skipped", name, i + 1)
             continue
         seen.add(name)
 
@@ -59,6 +64,12 @@ def parse_commands(path: Path) -> list:
             "permission": perm,
             "actions": actions,
         })
+
+    elapsed = time.monotonic() - t0
+    logger.info("parsed %d commands from %s in %.2fs", len(results), path.name, elapsed)
+
+    if not results:
+        logger.warning("no checkCommand patterns found in %s", path.name)
 
     return results
 
@@ -155,6 +166,8 @@ def _parse_actions(block: str) -> list:
 
 def parse_exchanges(path: Path) -> list:
     """Extract exchange categories (parsed but not injected as entities)."""
+    logger.debug("reading exchanges from %s", path)
+    t0 = time.monotonic()
     text = path.read_text(encoding="utf-8", errors="replace")
     result = []
 
@@ -182,11 +195,21 @@ def parse_exchanges(path: Path) -> list:
         pools = _extract_pools(body)
 
         if delivery or pools:
+            cat = _human(sname)
             result.append({
-                "category": _human(sname),
+                "category": cat,
                 "input": delivery,
                 "prize_pools": pools,
             })
+            logger.debug("  category '%s': %d inputs, %d pools", cat, len(delivery), len(pools))
+
+    elapsed = time.monotonic() - t0
+    total_items = sum(len(c["input"]) + sum(len(p) for p in c["prize_pools"]) for c in result)
+    logger.info("parsed %d exchange categories (%d items) from %s in %.2fs",
+                len(result), total_items, path.name, elapsed)
+
+    if not result:
+        logger.warning("no exchange categories found in %s", path.name)
 
     return result
 
@@ -283,21 +306,72 @@ def _human(name: str) -> str:
     return ''.join(r).strip()
 
 
+# ═══════════════════════ auto-discovery ═══════════════════════
+
+# Known AngelScript filenames to search for inside package directories.
+_COMMAND_FILENAME = "basic_command_handler.as"
+_EXCHANGE_FILENAME = "item_delivery_configurator_invasion.as"
+
+
+def _find_in_dirs(dirs: list[Path], filename: str) -> Path | None:
+    """Search for *filename* recursively inside each directory; return first hit."""
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        try:
+            for hit in d.rglob(filename):
+                logger.debug("found %s at %s", filename, hit)
+                return hit
+        except OSError:
+            continue
+    return None
+
+
 # ═══════════════════════ main ═══════════════════════
 
-def run() -> dict:
-    result = {"commands": [], "exchange_categories": []}
+def run(
+    cmd_path: Path | None = None,
+    exch_path: Path | None = None,
+    search_dirs: list[Path] | None = None,
+) -> dict:
+    """Run the full AS parse pipeline.
 
-    cp = Path(CMD_SRC)
-    if cp.exists():
+    Args:
+        cmd_path:       Explicit path to basic_command_handler.as.
+        exch_path:      Explicit path to item_delivery_configurator_invasion.as.
+        search_dirs:    Directories to auto-discover AS files (rglob by name).
+
+    Returns:
+        {"commands": [...], "exchange_categories": [...]}
+    """
+    result: dict = {"commands": [], "exchange_categories": []}
+    dirs = search_dirs or []
+
+    # ── resolve command source ────────────────────────────────
+    cp = cmd_path
+    if not cp:
+        cp = _find_in_dirs(dirs, _COMMAND_FILENAME)
+
+    if cp and cp.exists():
+        logger.info("parsing commands from %s", cp)
         result["commands"] = parse_commands(cp)
-        logger.info(f"Parse {len(result['commands'])} commands")
+    elif not cp:
+        logger.info("command source not found (%s) — skipping", _COMMAND_FILENAME)
+    else:
+        logger.warning("command source not found: %s", cp)
 
-    ep = Path(EXCH_SRC)
-    if ep.exists():
+    # ── resolve exchange source ───────────────────────────────
+    ep = exch_path
+    if not ep:
+        ep = _find_in_dirs(dirs, _EXCHANGE_FILENAME)
+
+    if ep and ep.exists():
+        logger.info("parsing exchanges from %s", ep)
         result["exchange_categories"] = parse_exchanges(ep)
-        total = sum(len(c["input"]) + sum(len(p) for p in c["prize_pools"]) for c in result["exchange_categories"])
-        logger.info(f"Parse {len(result['exchange_categories'])} exchange categories ({total} items)")
+    elif not ep:
+        logger.info("exchange source not found (%s) — skipping", _EXCHANGE_FILENAME)
+    else:
+        logger.warning("exchange source not found: %s", ep)
 
     return result
 
