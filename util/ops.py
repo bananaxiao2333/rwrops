@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Tuple
 from .classes import Config, Temp, TransformType, EntityConfig
 
+logger = logging.getLogger(__name__)
+
 
 def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: Optional[str] = None) -> Temp:
     """Parse XML content according to configuration and extract structured data."""
     cache = {}
-    logger = logging.getLogger(config.CONFIGFILE)
 
     # Track unique values per (entity_type, attribute_name) combination
     unique_values: Dict[Tuple[str, str], Set[Any]] = {}
@@ -338,8 +339,8 @@ def find_file_in_package_paths(filename: str, package_paths: List[str]) -> Optio
                 if file_path.is_file():
                     return str(file_path)
         except (OSError, PermissionError) as e:
-            logging.getLogger("ops").warning(
-                f"Error searching {package_dir}: {e}")
+            logger.warning(
+                "Error searching %s: %s", package_dir, e)
             continue
 
     return None
@@ -437,7 +438,6 @@ def apply_transform(value: str, transform: Optional[TransformType]) -> Any:
 
 def load_base_entity(base_file: str, config: Config, entity_selector: str, cache: Dict) -> Optional[Dict[str, Any]]:
     """Legacy function maintained for backward compatibility - now delegates to new implementation."""
-    logger = logging.getLogger("ops")
     base_attr_field = config.defaults.get('base_attr', 'inherit_from')
     return load_base_entity_with_inheritance(base_file, config, entity_selector, cache, logger, set(), base_attr_field)
 
