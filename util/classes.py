@@ -109,6 +109,12 @@ class Config(BaseModel):
     def default_empty_list(cls, v: Any) -> List[str]:
         return v or []
 
+    as_command_path: Optional[str] = None
+    as_exchange_path: Optional[str] = None
+
+    log_level: str = "INFO"
+    log_file: Optional[str] = None
+
     defaults: Dict[str, Any] = Field(default_factory=dict)
     entities: Dict[str, EntityConfig] = Field(default_factory=dict)
     must_have_attr: List[str] = Field(default_factory=list)

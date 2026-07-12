@@ -5,11 +5,21 @@ output_format: "json"
 pretty_print: true
 include_source: false
 generate_index_html: true
+
+# Logging configuration
+# log_level: "INFO"       # DEBUG | INFO | WARNING | ERROR | CRITICAL
+# log_file: "dist/rwrops.log"  # optional persistent debug log (always DEBUG level)
+
 sort:
   enable: true
   primarykey: "key"
 plugin_paths:
   # - "C:\\Users\\YOUR_USERNAME\\Documents\\test_sub_plugins"
+
+# AS parser — paths to AngelScript source files (command & exchange extraction)
+# Leave blank to skip AS parsing
+# as_command_path:  "path/to/scripts/trackers/basic_command_handler.as"
+# as_exchange_path: "path/to/scripts/gamemodes/invasion/item_delivery_configurator_invasion.as"
 
 exclude_patterns:
   - models
