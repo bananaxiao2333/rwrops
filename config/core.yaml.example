@@ -673,10 +673,10 @@ entities:
             target: "tag"
           - source: "@use_surface_color"
             target: "use_surface_color"
-            transform: "to_int"
+            transform: "to_bool"
           - source: "@post_processing"
             target: "post_processing"
-            transform: "to_int"
+            transform: "to_bool"
           - source: "@type"
             target: "type"
           - source: "@size"
@@ -762,26 +762,30 @@ entities:
       # 扁平化的 inventory 属性
       - source: "inventory/@encumbrance"
         target: "inventory_encumbrance"
-        transform: "to_int"
+        transform: "to_float"
       - source: "inventory/@price"
         target: "inventory_price"
-        transform: "to_int"
+        transform: "to_float"
       # 扁平化的 model 属性
       - source: "model/@mesh_filename"
         target: "model_mesh"
-      # 扁平化的 commonness 属性
-      - source: "commonness/@value"
-        target: "commonness_value"
-        transform: "to_float"
-      - source: "commonness/@in_stock"
-        target: "commonness_in_stock"
-        transform: "to_int"
-      - source: "commonness/@can_respawn_with"
-        target: "commonness_can_respawn_with"
-        transform: "to_int"
-
     children:
-      capacity:
+      commonness:
+        selector: "commonness"
+        name: "commonness"
+        is_array: false
+        attributes:
+          - source: "@value"
+            target: "value"
+            transform: "to_float"
+          - source: "@in_stock"
+            target: "in_stock"
+            transform: "to_bool"
+          - source: "@can_respawn_with"
+            target: "can_respawn_with"
+            transform: "to_bool"
+
+      capacities:
         selector: "capacity"
         name: "capacities"
         is_array: true
@@ -795,7 +799,7 @@ entities:
             target: "source_value"
             transform: "to_float"
 
-      modifier:
+      modifiers:
         selector: "modifier"
         name: "modifiers"
         is_array: true
@@ -1001,7 +1005,7 @@ entities:
                 target: "ref"
               - source: "@shadow"
                 target: "shadow"
-                transform: "to_int"
+                transform: "to_bool"
           sounds:
             selector: "sound"
             name: "sounds"
