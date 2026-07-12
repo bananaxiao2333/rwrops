@@ -9,14 +9,14 @@ from typing import Any, Dict
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 import yaml
-from util import Clogger
+from util.Clogger import setup_logging
 from util.classes import Config, Temp
 from util.file_utils import file_reader, walk_dir, xml_parser_factory
 from util.ops import parse_file
 from util.timer import timer
 
-Clogger.init_color_logger()
-logger = logging.getLogger("ROOT")
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 def clean_final(temp: Temp, primarykey: str) -> Temp:
@@ -80,7 +80,8 @@ def clean_final(temp: Temp, primarykey: str) -> Temp:
 @timer
 def main_procces(config: Config):
     temp = Temp()
-    Plogger = logging.getLogger(config.CONFIGFILE)
+    log = logging.getLogger(__name__)
+    log.info("processing config '%s'", config.CONFIGFILE)
 
     @timer
     def scan(config: Config, temp: Temp) -> Temp:
@@ -89,7 +90,7 @@ def main_procces(config: Config):
             if not src_paths:
                 continue
             for p in src_paths:
-                Plogger.debug(f"walking in {src_name} '{p}'")
+                log.debug(f"walking in {src_name} '{p}'")
                 for path in walk_dir(Path(p), config.exclude_patterns):
                     try:
                         data = file_reader(path, size=5)
@@ -107,7 +108,7 @@ def main_procces(config: Config):
 
     temp: Temp = scan(config, temp)
 
-    Plogger.debug(
+    log.debug(
         f"configuration: {len(temp.conf_file)} resource: {len(temp.res_file)} ")
     conf_type = {}
     for item in temp.conf_file:
@@ -118,9 +119,9 @@ def main_procces(config: Config):
             res_type[str(os.path.basename(item)).split(".")[1]] = 0
         except:
             pass
-    Plogger.debug(
+    log.debug(
         f"configuration types: {list(conf_type.keys())} ")
-    Plogger.debug(
+    log.debug(
         f"resource: {list(res_type.keys())} ")
 
     with tqdm(range(len(temp.conf_file)), desc="Files") as pbar:
@@ -137,7 +138,19 @@ def main_procces(config: Config):
     # ── Plugin hooks: parse AngelScript files for commands & exchange items ──
     try:
         from util.as_parser import run as run_as_parser
-        as_data = run_as_parser()
+
+        # Build search dirs from package_path + plugin_paths
+        search_dirs: list[Path] = []
+        for p in config.package_path:
+            search_dirs.append(Path(p))
+        for p in config.plugin_paths:
+            search_dirs.append(Path(p))
+
+        as_data = run_as_parser(
+            cmd_path=Path(config.as_command_path) if config.as_command_path else None,
+            exch_path=Path(config.as_exchange_path) if config.as_exchange_path else None,
+            search_dirs=search_dirs,
+        )
         # Inject commands as entities
         for cmd in as_data.get("commands", []):
             cmd["type"] = "command_config"
@@ -145,7 +158,7 @@ def main_procces(config: Config):
             temp.final.append(cmd)
         n_cmds = len(as_data.get("commands", []))
         n_exch = len(as_data.get("exchange_categories", []))
-        Plogger.info(f"AS plugin: {n_cmds} commands, {n_exch} exchange categories")
+        log.info(f"AS plugin: {n_cmds} commands, {n_exch} exchange categories")
 
         # Attach exchange data: forward (this → prizes) and reverse (prize → source)
         for cat in as_data.get("exchange_categories", []):
@@ -187,7 +200,7 @@ def main_procces(config: Config):
                                 entity["exchange_sources"].append(source_entry)
                             break
     except Exception as e:
-        Plogger.warning(f"AS plugin failed: {e}")
+        log.warning(f"AS plugin failed: {e}")
 
     # Collect all referenced filenames from entity data (recursive)
     refs = set()
@@ -275,7 +288,7 @@ def main_procces(config: Config):
             res_files_exported += 1
             asset_map[rel_posix] = destination.name
         except Exception as e:
-            Plogger.warning(f"Failed to copy {res_file_path} to {destination}: {e}")
+            log.warning(f"Failed to copy {res_file_path} to {destination}: {e}")
 
     # Rewrite result.json references to use relative paths (matching _index.json keys)
     def _rewrite_refs(obj: Any) -> Any:
@@ -297,7 +310,7 @@ def main_procces(config: Config):
         with open(assets_dir / "_index.json", "w", encoding="utf-8") as f:
             json.dump(asset_map, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        Plogger.warning(f"Failed to write asset index: {e}")
+        log.warning(f"Failed to write asset index: {e}")
 
     # result.json + metadata.yaml
     with open(out_dir / "result.json", 'w', encoding='utf-8') as f:
@@ -317,7 +330,7 @@ def main_procces(config: Config):
     with open(out_dir / "metadata.yaml", 'w', encoding='utf-8') as f:
         yaml.dump(metadata, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-    Plogger.info(f"Wrote result.json + metadata.yaml + assets/ ({res_files_exported} files) to dist/")
+    log.info(f"Wrote result.json + metadata.yaml + assets/ ({res_files_exported} files) to dist/")
 
     # ── Generate index.html ──────────────────────────────────────────
     if config.generate_index_html:
@@ -330,9 +343,9 @@ def main_procces(config: Config):
                 metadata=metadata,
                 asset_map=asset_map,
             )
-            Plogger.info("Wrote index.html")
+            log.info("Wrote index.html")
         except Exception as e:
-            Plogger.warning(f"Failed to generate index.html: {e}")
+            log.warning(f"Failed to generate index.html: {e}")
 
 
 if __name__ == "__main__":
@@ -354,5 +367,9 @@ if __name__ == "__main__":
             logger.critical(
                 f"error when reading config '{item}'", exc_info=e)
             continue
+
+        # Re-init logging with config-level settings
+        setup_logging(level=config.log_level, log_file=config.log_file)
+
         logger.info(f"handling config '{item}'")
         main_procces(config)
