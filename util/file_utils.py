@@ -32,16 +32,14 @@ def walk_dir(path: Path, exclude_patterns: Optional[List[str]] = None):
     def is_excluded(name: str) -> bool:
         return any(p.fullmatch(name) for p in patterns)
 
-    total = 0
-    for root, dirs, files in os.walk(path, topdown=True):
-        dirs[:] = [d for d in dirs if not is_excluded(d)]
-        total += len([f for f in files if not is_excluded(f)])
-
-    with tqdm(range(total), desc='walk progress') as tbar:
+    # sorted() so traversal order is a property of the tree, not of the
+    # filesystem. Everything downstream (inherit resolution, clean_final merge)
+    # is order-sensitive, so unsorted walk makes output machine-dependent.
+    with tqdm(desc='walk progress') as tbar:
         for root, dirs, files in os.walk(path, topdown=True):
-            dirs[:] = [d for d in dirs if not is_excluded(d)]
-            for file in files:
+            dirs[:] = sorted(d for d in dirs if not is_excluded(d))
+            for file in sorted(files):
                 if not is_excluded(file):
+                    tbar.set_description_str(root.replace(str(path), ""))
+                    tbar.update()
                     yield Path(os.path.join(root, file))
-                tbar.set_description_str(root.replace(str(path), ""))
-                tbar.update()

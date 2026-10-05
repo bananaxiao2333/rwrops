@@ -48,6 +48,12 @@ class EntityConfig(BaseModel):
     selector: str
     name: str
     is_array: bool
+    # True = search all descendants (historical behaviour, kept as the default so
+    # this stayed a no-op refactor). False = direct children only. Some configs
+    # rely on deep search to skip an intermediate wrapper element; others were
+    # only ever getting nested matches belonging to a *different* parent
+    # selector. Flip per child, one at a time, and read the gate diff.
+    deep: bool = True
     must_have_attr: Optional[List[str]] = None
     key_from_path: Optional[str] = None
     derive_fields: List[DeriveField] = Field(default_factory=list)
@@ -76,6 +82,7 @@ class EntityConfig(BaseModel):
             selector=selector,
             name=name,
             is_array=is_array,
+            deep=data.get('deep', True),
             must_have_attr=must_have_attr,
             key_from_path=key_from_path,
             derive_fields=derive_fields,

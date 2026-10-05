@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Tuple
 from .classes import Config, Temp, TransformType, EntityConfig
+from . import gate
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +256,11 @@ def parse_entity(element: Tag, entity_config: EntityConfig, config: Config, cach
 
     # Process children
     for child_name, child_config in entity_config.children.items():
-        child_elements = element.find_all(child_config.selector)
+        # recursive=child_config.deep. When deep is False this returns only
+        # direct children, so a <turret> sitting inside <character_slot> stops
+        # being counted as a vehicle-level turret.
+        child_elements = element.find_all(
+            child_config.selector, recursive=child_config.deep)
 
         if child_config.is_array:
             # Multiple children - create array
@@ -270,6 +275,10 @@ def parse_entity(element: Tag, entity_config: EntityConfig, config: Config, cach
                     child_data_list.append(child_data)
             if child_data_list:
                 entity_data[child_config.name] = child_data_list
+            # A matched element that parses to {} is invisible in the output.
+            # Usually legitimate, but it is also what silently hides a child
+            # that was matched from the wrong parent. Counted, not ignored.
+            gate.bump("child_dropped_empty", len(child_elements) - len(child_data_list))
         else:
             # Single child - take first match
             if child_elements:
@@ -280,6 +289,8 @@ def parse_entity(element: Tag, entity_config: EntityConfig, config: Config, cach
                     root_level_attrs[key] = value
                 if child_data:
                     entity_data[child_config.name] = child_data
+                else:
+                    gate.bump("child_dropped_empty")
 
     return entity_data, root_level_attrs
 
@@ -322,7 +333,12 @@ def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entit
 
 
 def find_file_in_package_paths(filename: str, package_paths: List[str]) -> Optional[str]:
-    """Recursively search for a file in all package paths and their subdirectories."""
+    """Recursively search for a file in all package paths and their subdirectories.
+
+    Returns a *deterministic* hit and reports ambiguity. rglob used to return
+    whichever match the filesystem happened to yield first, so a base file
+    present in several directories silently merged the wrong parent.
+    """
     for package_dir in package_paths:
         package_path = Path(package_dir)
         if not package_path.exists():
@@ -335,25 +351,33 @@ def find_file_in_package_paths(filename: str, package_paths: List[str]) -> Optio
 
         # Then, recursively search all subdirectories
         try:
-            for file_path in package_path.rglob(filename):
-                if file_path.is_file():
-                    return str(file_path)
+            hits = sorted(str(p) for p in package_path.rglob(filename) if p.is_file())
         except (OSError, PermissionError) as e:
             logger.warning(
                 "Error searching %s: %s", package_dir, e)
             continue
+
+        if hits:
+            if len(hits) > 1:
+                logger.error(
+                    "inherit_from '%s' matches %d files, using %s (others: %s)",
+                    filename, len(hits), hits[0], hits[1:4])
+                gate.bump("inherit_ambiguous")
+            return hits[0]
 
     return None
 
 
 def load_base_entity_with_inheritance(base_file: str, config: Config, entity_selector: str, cache: Dict, logger: logging.Logger, visited_files: set, base_attr_field: str = "inherit_from") -> Optional[Dict[str, Any]]:
     """Load and parse a base entity from file, including resolving its own inheritance."""
-    cache_key = f"{base_file}:{entity_selector}"
-    if cache_key in cache:
-        return cache.get(cache_key)
-
     # Try to find the base file in configured package paths (including subdirectories)
     base_path = find_file_in_package_paths(base_file, config.package_path)
+
+    # Key the cache on the resolved path, not the bare filename: two different
+    # files called tank.vehicle used to share one cache entry.
+    cache_key = f"{base_path or base_file}:{entity_selector}"
+    if cache_key in cache:
+        return cache.get(cache_key)
 
     if base_path:
         try:

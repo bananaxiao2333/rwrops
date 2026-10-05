@@ -11,7 +11,7 @@ log_level: "DEBUG"       # DEBUG | INFO | WARNING | ERROR | CRITICAL
 # log_file: "dist/rwrops.log"  # optional persistent debug log (always DEBUG level)
 
 sort:
-  enable: true
+  enable: false
   primarykey: "key"
 plugin_paths:
   # - "C:\\Users\\hongx\\Documents\\test_sub_plugins"
@@ -146,6 +146,10 @@ entities:
         selector: "turret"
         name: "turrets"
         is_array: true
+        # 109 direct children vs 192 with deep search. The extra 83 are the
+        # <turret> elements inside <character_slot>, which has its own turrets
+        # block below — they were being counted under the vehicle as well.
+        deep: false
         attributes:
           - source: "@offset"
             target: "offset"
