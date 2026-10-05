@@ -250,12 +250,17 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy di
 
 ## 6. 代码约定
 
-1. **丢弃必须计数。** 任何 `continue` / `return None` / `except` 掩盖数据的地方，加 `gate.bump("<reason>")`，理由用 snake_case。
-2. **不要静默 `except Exception: pass`。** 至少 `logger.warning` + 计数。
-3. **遍历必须有序。** 新增任何文件遍历/查找，先 `sorted()`。
-4. **一个输出。** 不要为了兼容再发一份 JSON；契约变了就改前端。
-5. **不要凭直觉改匹配语义。** 先按 §3.3 量。
-6. **`config/` 是 git-ignored**（`.gitignore:17` 的 `config/*`，只白名单 `*.example` / `*.dis`），
+1. **管线注入的元字段一律 `_` 前缀。** 配置能提取的字段名都是普通标识符，core.yaml 里没有任何以 `_`
+   开头的 target，所以 `_` 前缀**结构上不可能与实体字段冲突**。
+   这不是洁癖：`_id`/`_source` 原本叫 `id`/`source`，而 `language` 规则会提取 `@id`（语言代码），
+   被覆盖后**线上语言切换直接失效**。新增任何注入字段前先查：
+   `grep -n 'target: "_' config/core.yaml` 应为空。
+2. **丢弃必须计数。** 任何 `continue` / `return None` / `except` 掩盖数据的地方，加 `gate.bump("<reason>")`，理由用 snake_case。
+3. **不要静默 `except Exception: pass`。** 至少 `logger.warning` + 计数。
+4. **遍历必须有序。** 新增任何文件遍历/查找，先 `sorted()`。
+5. **一个输出。** 不要为了兼容再发一份 JSON；契约变了就改前端。
+6. **不要凭直觉改匹配语义。** 先按 §3.3 量。
+7. **`config/` 是 git-ignored**（`.gitignore:17` 的 `config/*`，只白名单 `*.example` / `*.dis`），
    但 `config/core.yaml` 是**已跟踪**的，忽略规则不作用于已跟踪文件。
    复制别人的配置进来时（`core.yaml.dis` 之类）要清楚它**不会**被提交：
 
@@ -263,7 +268,7 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy di
    git check-ignore -v config/core.yaml   # 无输出 = 已跟踪，正常
    git check-ignore -v config/foo.yaml    # 输出 .gitignore:17 = 会被忽略
    ```
-7. Python ≥ 3.14，依赖用 `uv`（`lxml` 已在依赖里，需要更快解析时直接可用）。
+8. Python ≥ 3.14，依赖用 `uv`（`lxml` 已在依赖里，需要更快解析时直接可用）。
 
 ---
 

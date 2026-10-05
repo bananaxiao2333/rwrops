@@ -106,8 +106,8 @@ def main_procces(config: Config):
         for cmd in as_data.get("commands", []):
             cmd["type"] = "command_config"
             cmd["key"] = cmd["command"]
-            cmd["source"] = cmd_src
-            cmd["id"] = f"command_config:{cmd['command']}@{cmd_src or '?'}"
+            cmd["_source"] = cmd_src
+            cmd["_id"] = f"command_config:{cmd['command']}@{cmd_src or '?'}"
             temp.final.append(cmd)
         n_cmds = len(as_data.get("commands", []))
         n_exch = len(as_data.get("exchange_categories", []))
@@ -176,7 +176,7 @@ def main_procces(config: Config):
     to_dump = temp.final
     if config.sort.enable:
         pk = config.sort.primarykey
-        to_dump = sorted(to_dump, key=lambda e: str(e.get(pk) or e.get("id") or ""))
+        to_dump = sorted(to_dump, key=lambda e: str(e.get(pk) or e.get("_id") or ""))
 
     json_str = json.dumps(to_dump, ensure_ascii=False)
 

@@ -106,14 +106,19 @@ def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: 
                 # key alone is not unique and cannot be used as an address.
                 rel = rel_source(source_path, config.package_path)
                 entity_data["type"] = entity_config_obj.name
-                entity_data["source"] = rel
-                entity_data["id"] = "%s:%s@%s" % (
+                # Underscore prefix: config targets are plain identifiers and no
+                # rule in core.yaml uses one, so these cannot collide with an
+                # entity's own fields. They did when they were `id`/`source` --
+                # `language` extracts `@id`, and overwriting it broke the
+                # frontend's language switcher.
+                entity_data["_source"] = rel
+                entity_data["_id"] = "%s:%s@%s" % (
                     entity_config_obj.name,
                     entity_data.get("key") or entity_data.get("name") or "?",
                     rel or "?",
                 )
                 temp.final.append(entity_data)
-                if not any(k not in ("type", "source", "id") for k in entity_data):
+                if not any(k not in ("type", "_source", "_id") for k in entity_data):
                     # Matched the selector but carries none of the configured
                     # attributes. Kept (identity is useful) but counted.
                     gate.bump("entity_empty")
