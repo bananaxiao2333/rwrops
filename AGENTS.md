@@ -199,6 +199,49 @@ npm run build && edgeone pages deploy dist
 数据先、前端后。前端会把 `result.json` 的字段路径写进用户配置（MetaGen），
 先发前端而数据还是旧的，用户会拿到指向不存在字段的配置。
 
+### 5.5 回退（部署前必须先做）
+
+EdgeOne Makers 是**整体覆盖上传，没有版本历史**，CLI 也没有回退子命令（只有 init/dev/link/deploy）。
+所以**回退的唯一凭据是部署前自己留的副本**。
+
+**部署前：**
+
+```bash
+# 1. 记录并镜像线上数据站（脚本见下）
+python3 RWR/rwrops/tools/mirror_live.py https://rwr-static.079682.xyz \
+        /Users/bananaxiao/Documents/RWR/_rollback/rwr-static-live
+
+# 2. 验证镜像指纹等于线上
+shasum -a 256 _rollback/rwr-static-live/result.json
+curl -sS https://rwr-static.079682.xyz/result.json | shasum -a 256
+```
+
+**回退：**
+
+```bash
+cd RWR/rwrops && edgeone pages deploy ../_rollback/rwr-static-live   # 数据站
+cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy dist  # 前端
+```
+
+前端不需要镜像——它的源码在 git 里，回退就是 checkout 旧提交后重建。
+
+**部署顺序：破坏性变更要「前端先、数据后」。**
+
+`AGENTS.md` §5.4 说数据先，那是对**增量**变更而言（前端会把字段路径写进用户配置）。
+但对**破坏性**变更（如 result.json 换形状），旧前端读新数据会直接崩，所以反过来。
+
+前提是两端都装了**过渡垫片**：新前端/新 bot 同时认旧形状（打 warning），
+这样顺序任意、数据与前端可各自独立回退。垫片在 schema 2 稳定一段时间后删掉。
+
+### 5.6 线上地址
+
+| 站点 | 地址 | 备注 |
+| --- | --- | --- |
+| 数据 | `https://rwr-static.079682.xyz` | 线上有效，前端与 bot 都从这里取数 |
+| 前端 | `https://rwrops.079682.xyz` | **当前 NXDOMAIN（连 8.8.8.8 也查不到）**，README 里的地址是旧的 |
+
+改前端域名时，记得同步 `rwrops_webhelper/README.md` 和 `scripts/generate-sitemap.js`。
+
 ---
 
 ## 6. 代码约定
