@@ -18,8 +18,8 @@ A flexible XML data parser for [Running With Rifles](https://www.runningwithrifl
 
 ```bash
 # 1. Clone
-git clone https://github.com/bananaxiao2333/rwrops-core.git
-cd rwrops-core
+git clone https://github.com/bananaxiao2333/rwrops.git
+cd rwrops
 
 # 2. Install (uv)
 uv sync
@@ -31,6 +31,10 @@ cp config/core.yaml.example config/core.yaml
 # 4. Run
 uv run python main.py
 ```
+
+> **Contributing?** Read [`AGENTS.md`](AGENTS.md) first. Every change must pass
+> `./gate.sh`, which checks that two runs produce identical output, reports what
+> the run discarded, and diffs against the previous run to prove no data was lost.
 
 Output lands in `dist/`:
 - `result.json` — all parsed entity data
