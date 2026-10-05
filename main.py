@@ -14,6 +14,7 @@ from util.classes import Config, Temp
 from util.file_utils import file_reader, walk_dir, xml_parser_factory
 from util.ops import parse_file
 from util.timer import timer
+from util import gate
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ def clean_final(temp: Temp, primarykey: str) -> Temp:
                 if key in ret[type]:
                     # Merge: lists append unique, scalar keep existing
                     existing = ret[type][key]
+                    gate.bump("key_collision_merge")
                     for k2, v2 in item.items():
                         if isinstance(v2, list) and isinstance(existing.get(k2), list):
                             seen = {str(e) for e in existing[k2]}
@@ -42,6 +44,10 @@ def clean_final(temp: Temp, primarykey: str) -> Temp:
                                     seen.add(str(e))
                         elif k2 not in existing:
                             existing[k2] = v2
+                        elif existing[k2] != v2:
+                            # Scalar differs between two entities sharing a key.
+                            # First one wins (walk order), the other is dropped.
+                            gate.bump("key_collision_scalar_dropped")
                 else:
                     ret[type][key] = item
 
@@ -131,8 +137,10 @@ def main_procces(config: Config):
                 xml_content: BeautifulSoup = xml_parser_factory(data)
                 temp = parse_file(content=xml_content,
                                   config=config, temp=temp, source_path=item)
-            except Exception:
-                logger.warning(f"Error when parsing: {item}")
+            except Exception as e:
+                # A whole file's data disappears here. Count it, don't just warn.
+                logger.warning(f"Error when parsing: {item}: {e}")
+                gate.bump("parse_error")
             pbar.update()
 
     # ── Plugin hooks: parse AngelScript files for commands & exchange items ──
@@ -346,6 +354,9 @@ def main_procces(config: Config):
             log.info("Wrote index.html")
         except Exception as e:
             log.warning(f"Failed to generate index.html: {e}")
+
+    # ── Drop ledger: what this run threw away, and why ──────────────
+    gate.report(log)
 
 
 if __name__ == "__main__":
