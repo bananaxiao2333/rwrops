@@ -184,6 +184,18 @@ entities:
             target: "mesh"
           - source: "@texture_filename"
             target: "texture"
+          - source: "@texture_atlas_cell"
+            target: "texture_atlas_cell"
+            transform: "to_int"
+          - source: "@turret_index"
+            target: "turret_index"
+            transform: "to_int"
+          - source: "@max_tilt"
+            target: "max_tilt"
+            transform: "to_float"
+          - source: "@offset"
+            target: "offset"
+            transform: "parse_vector3"
 
       character_slots:
         selector: "character_slot"
@@ -361,6 +373,9 @@ entities:
               - source: "@direction_spread"
                 target: "direction_spread"
                 transform: "parse_vector2"
+              - source: "@activated"
+                target: "activated"
+                transform: "to_bool"
   weapon:
     selector: "weapon"
     name: "weapon"
@@ -371,6 +386,9 @@ entities:
         target: "inherit_from"
       - source: "@key"
         target: "key"
+      - source: "@enabled"
+        target: "enabled"
+        transform: "to_bool"
       - source: "#text"
         target: "description"
       # 扁平化的 specification 属性
@@ -425,6 +443,12 @@ entities:
         transform: "to_float"
       - source: "inventory/@price"
         target: "inventory_price"
+        transform: "to_float"
+      - source: "inventory/@buy_price"
+        target: "inventory_buy_price"
+        transform: "to_float"
+      - source: "inventory/@sell_price"
+        target: "inventory_sell_price"
         transform: "to_float"
       # 扁平化的 weak_hand_hold 属性
       - source: "weak_hand_hold/@offset"
@@ -530,6 +554,103 @@ entities:
           - source: "@value"
             target: "value"
             transform: "to_float"
+
+      tags:
+        selector: "tag"
+        name: "tags"
+        is_array: true
+        attributes:
+          - source: "@name"
+            target: "name"
+
+      addon_models:
+        selector: "addon_model"
+        name: "addon_models"
+        is_array: true
+        attributes:
+          - source: "@filename"
+            target: "filename"
+
+      next_in_chains:
+        selector: "next_in_chain"
+        name: "next_in_chains"
+        is_array: true
+        attributes:
+          - source: "@key"
+            target: "key"
+          - source: "@share_ammo"
+            target: "share_ammo"
+            transform: "to_bool"
+
+      ballistics:
+        selector: "ballistics"
+        name: "ballistics"
+        is_array: false
+        attributes:
+          - source: "@curve_height"
+            target: "curve_height"
+            transform: "to_float"
+          - source: "@near_far_distance"
+            target: "near_far_distance"
+            transform: "to_float"
+          - source: "@speed_estimation_near"
+            target: "speed_estimation_near"
+            transform: "to_float"
+          - source: "@speed_estimation_far"
+            target: "speed_estimation_far"
+            transform: "to_float"
+          - source: "@max_speed"
+            target: "max_speed"
+            transform: "to_float"
+          - source: "@randomness"
+            target: "randomness"
+            transform: "to_float"
+          - source: "@tweak_factor"
+            target: "tweak_factor"
+            transform: "to_float"
+
+      shields:
+        selector: "shield"
+        name: "shields"
+        is_array: true
+        attributes:
+          - source: "@offset"
+            target: "offset"
+            transform: "parse_vector3"
+          - source: "@extent"
+            target: "extent"
+            transform: "parse_vector3"
+          - source: "@usable_for_cover"
+            target: "usable_for_cover"
+            transform: "to_bool"
+
+      drop_on_death_results:
+        selector: "drop_on_death_result"
+        name: "drop_on_death_results"
+        is_array: true
+        attributes:
+          - source: "@class"
+            target: "class"
+          - source: "@instance_class"
+            target: "instance_class"
+          - source: "@instance_key"
+            target: "instance_key"
+          - source: "@min_amount"
+            target: "min_amount"
+            transform: "to_int"
+          - source: "@max_amount"
+            target: "max_amount"
+            transform: "to_int"
+          - source: "@offset"
+            target: "offset"
+            transform: "parse_vector3"
+          - source: "@position_spread"
+            target: "position_spread"
+            transform: "parse_vector2"
+          - source: "@direction_spread"
+            target: "direction_spread"
+            transform: "parse_vector2"
+
   projectile:
     selector: "projectile"
     name: "projectile"
@@ -581,6 +702,9 @@ entities:
       - source: "@use_time_to_live"
         target: "use_time_to_live"
         transform: "to_int"
+      - source: "@drop_count_limit_in_range"
+        target: "drop_count_limit_in_range"
+        transform: "to_int"
       # 扁平化的 hud_icon 属性
       - source: "hud_icon/@filename"
         target: "hud_icon_filename"
@@ -600,6 +724,8 @@ entities:
         transform: "to_float"
       - source: "result/@character_state"
         target: "result_character_state"
+      - source: "result/@decal"
+        target: "result_decal"
       # 扁平化的 model 属性
       - source: "model/@mesh_filename"
         target: "model_mesh"
@@ -677,6 +803,12 @@ entities:
           - source: "@post_processing"
             target: "post_processing"
             transform: "to_bool"
+          - source: "@lighting"
+            target: "lighting"
+            transform: "to_bool"
+          - source: "@additive"
+            target: "additive"
+            transform: "to_bool"
           - source: "@type"
             target: "type"
           - source: "@size"
@@ -732,6 +864,19 @@ entities:
           - source: "@price"
             target: "price"
             transform: "to_float"
+          - source: "@buy_price"
+            target: "buy_price"
+            transform: "to_float"
+          - source: "@sell_price"
+            target: "sell_price"
+            transform: "to_float"
+      project_rotations:
+        selector: "rotation"
+        name: "rotations"
+        is_array: true
+        attributes:
+          - source: "@class"
+            target: "class"
   carry_item:
     selector: "carry_item"
     name: "carry_item"
@@ -756,6 +901,12 @@ entities:
       - source: "@player_death_drop_owner_lock_time"
         target: "player_death_drop_owner_lock_time"
         transform: "to_float"
+      - source: "@drop_count_factor_on_death"
+        target: "drop_count_factor_on_death"
+        transform: "to_float"
+      - source: "@drop_count_factor_on_player_death"
+        target: "drop_count_factor_on_player_death"
+        transform: "to_float"
       # 扁平化的 hud_icon 属性
       - source: "hud_icon/@filename"
         target: "hud_icon_filename"
@@ -766,9 +917,19 @@ entities:
       - source: "inventory/@price"
         target: "inventory_price"
         transform: "to_float"
+      - source: "inventory/@buy_price"
+        target: "inventory_buy_price"
+        transform: "to_float"
+      - source: "inventory/@sell_price"
+        target: "inventory_sell_price"
+        transform: "to_float"
       # 扁平化的 model 属性
       - source: "model/@mesh_filename"
         target: "model_mesh"
+      - source: "model/@filename"
+        target: "model_filename"
+      - source: "model/@texture_filename"
+        target: "model_texture_filename"
     children:
       commonness:
         selector: "commonness"
@@ -829,6 +990,44 @@ entities:
           - source: "@offset"
             target: "offset"
             transform: "parse_vector3"
+
+      drop_on_death_results:
+        selector: "drop_on_death_result"
+        name: "drop_on_death_results"
+        is_array: true
+        attributes:
+          - source: "@class"
+            target: "class"
+          - source: "@instance_class"
+            target: "instance_class"
+          - source: "@instance_key"
+            target: "instance_key"
+          - source: "@min_amount"
+            target: "min_amount"
+            transform: "to_int"
+          - source: "@max_amount"
+            target: "max_amount"
+            transform: "to_int"
+          - source: "@offset"
+            target: "offset"
+            transform: "parse_vector3"
+          - source: "@position_spread"
+            target: "position_spread"
+            transform: "parse_vector3"
+          - source: "@direction_spread"
+            target: "direction_spread"
+            transform: "parse_vector3"
+          - source: "@faction_id"
+            target: "faction_id"
+
+      tags:
+        selector: "tag"
+        name: "tags"
+        is_array: true
+        attributes:
+          - source: "@name"
+            target: "name"
+
   translation:
     selector: "translation"
     name: "language"
@@ -938,10 +1137,15 @@ entities:
     is_array: false
 
     attributes:
+      - source: "@file"
+        target: "inherit_from"
       - source: "@name"
         target: "name"
       - source: "@key"
         target: "key"
+      - source: "@acknowledge_time"
+        target: "acknowledge_time"
+        transform: "to_float"
       - source: "@initiation_comment1"
         target: "initiation_comment1"
       - source: "@initiation_comment2"
@@ -1052,6 +1256,12 @@ entities:
           - source: "@price"
             target: "price"
             transform: "to_float"
+          - source: "@buy_price"
+            target: "buy_price"
+            transform: "to_float"
+          - source: "@sell_price"
+            target: "sell_price"
+            transform: "to_float"
 
   faction:
     selector: "faction"
@@ -1059,10 +1269,15 @@ entities:
     is_array: false
 
     attributes:
+      - source: "@file"
+        target: "inherit_from"
       - source: "@name"
         target: "name"
       - source: "@name"
         target: "key"
+      - source: "@map_view_color_intensity"
+        target: "map_view_color_intensity"
+        transform: "to_float"
       - source: "@color"
         target: "color"
         transform: "parse_vector3"
@@ -1124,11 +1339,55 @@ entities:
             target: "firstnames_file"
           - source: "@lastnames_file"
             target: "lastnames_file"
+          - source: "@copy_from"
+            target: "copy_from"
           - source: "character/@filename"
             target: "character_file"
           - source: "ai/@filename"
             target: "ai_file"
         children:
+          soldier_character:
+            selector: "character"
+            name: "character"
+            is_array: false
+            attributes:
+              - source: "@filename"
+                target: "filename"
+            children:
+              character_parameters:
+                selector: "parameter"
+                name: "parameters"
+                is_array: true
+                attributes:
+                  - source: "@class"
+                    target: "class"
+                  - source: "@value"
+                    target: "value"
+
+          soldier_ai:
+            selector: "ai"
+            name: "ai"
+            is_array: false
+            attributes:
+              - source: "@filename"
+                target: "filename"
+            children:
+              ai_attributes:
+                selector: "attribute_config"
+                name: "attribute_configs"
+                is_array: true
+                attributes:
+                  - source: "@class"
+                    target: "class"
+
+          soldier_models:
+            selector: "model"
+            name: "models"
+            is_array: true
+            attributes:
+              - source: "@filename"
+                target: "filename"
+
           models:
             selector: "models"
             name: "models"
