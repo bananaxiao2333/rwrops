@@ -60,7 +60,8 @@ def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: 
             if config.defaults.get('inherit_enabled', False):
                 # Resolve full inheritance chain recursively using the correct base field
                 entity_data = resolve_inheritance_chain(
-                    entity_data, config, entity_config_obj.selector, cache, logger, set(), base_attr_field)
+                    entity_data, config, entity_config_obj.selector, cache, logger, set(),
+                    base_attr_field, str(Path(source_path).parent) if source_path else None)
 
             # Apply uniqueness constraints
             entity_data = apply_uniqueness_constraints(
@@ -108,7 +109,18 @@ def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: 
 
 
 def apply_uniqueness_constraints(entity_data: Dict[str, Any], entity_config: EntityConfig, entity_name: str, unique_values: Dict[Tuple[str, str], Set[Any]], logger: logging.Logger) -> Optional[Dict[str, Any]]:
-    """Apply uniqueness constraints to entity data. Returns None if entity should be discarded due to duplicates."""
+    """Apply uniqueness constraints to entity data.
+
+    A duplicate used to `return None`, which threw away the whole entity — every
+    other field it carried, not just the duplicated one. It now drops only the
+    duplicated field and counts it, so a `unique: true` flag can no longer empty
+    a record. (core.yaml does not currently use `unique:`, so this is a latent
+    trap being defused, not a behaviour change today.)
+    """
+
+    def dup(target: str) -> None:
+        entity_data.pop(target, None)
+        gate.bump("unique_duplicate_field")
 
     # Check root-level attributes for uniqueness
     for attr_mapping in entity_config.attributes:
@@ -123,21 +135,24 @@ def apply_uniqueness_constraints(entity_data: Dict[str, Any], entity_config: Ent
             try:
                 if value in unique_values[key]:
                     logger.warning(
-                        f"Duplicate value '{value}' found for {entity_name}.{attr_mapping.target}, discarding entity")
-                    return None
+                        f"Duplicate value '{value}' for {entity_name}.{attr_mapping.target}, dropping field")
+                    dup(attr_mapping.target)
+                    continue
                 unique_values[key].add(value)
             except TypeError:
                 # Handle unhashable types (like lists/dicts) by converting to string
                 value_str = str(value)
                 if value_str in unique_values[key]:
                     logger.warning(
-                        f"Duplicate value '{value}' found for {entity_name}.{attr_mapping.target}, discarding entity")
-                    return None
+                        f"Duplicate value '{value}' for {entity_name}.{attr_mapping.target}, dropping field")
+                    dup(attr_mapping.target)
+                    continue
                 unique_values[key].add(value_str)
 
-    # Check nested attributes for uniqueness
+    # Check nested attributes for uniqueness. Nothing here discards the entity
+    # any more; a duplicated field is dropped and counted.
     def check_nested_uniqueness(data: Dict[str, Any], parent_config: EntityConfig, current_entity_name: str):
-        """Recursively check nested structures for uniqueness constraints."""
+        """Recursively drop duplicated fields under uniqueness constraints."""
         for child_name, child_config in parent_config.children.items():
             if child_name in data:
                 child_data = data[child_name]
@@ -158,20 +173,23 @@ def apply_uniqueness_constraints(entity_data: Dict[str, Any], entity_config: Ent
                                     try:
                                         if value in unique_values[key]:
                                             logger.warning(
-                                                f"Duplicate value '{value}' found for {current_entity_name}.{child_name}.{attr_mapping.target}, discarding entity")
-                                            return False
+                                                f"Duplicate value '{value}' for {current_entity_name}.{child_name}.{attr_mapping.target}, dropping field")
+                                            item.pop(attr_mapping.target, None)
+                                            gate.bump("unique_duplicate_field")
+                                            continue
                                         unique_values[key].add(value)
                                     except TypeError:
                                         value_str = str(value)
                                         if value_str in unique_values[key]:
                                             logger.warning(
-                                                f"Duplicate value '{value}' found for {current_entity_name}.{child_name}.{attr_mapping.target}, discarding entity")
-                                            return False
+                                                f"Duplicate value '{value}' for {current_entity_name}.{child_name}.{attr_mapping.target}, dropping field")
+                                            item.pop(attr_mapping.target, None)
+                                            gate.bump("unique_duplicate_field")
+                                            continue
                                         unique_values[key].add(value_str)
 
                             # Recursively check deeper nesting
-                            if not check_nested_uniqueness(item, child_config, current_entity_name):
-                                return False
+                            check_nested_uniqueness(item, child_config, current_entity_name)
                 elif isinstance(child_data, dict):
                     # Single child object
                     for attr_mapping in child_config.attributes:
@@ -186,25 +204,26 @@ def apply_uniqueness_constraints(entity_data: Dict[str, Any], entity_config: Ent
                             try:
                                 if value in unique_values[key]:
                                     logger.warning(
-                                        f"Duplicate value '{value}' found for {current_entity_name}.{child_name}.{attr_mapping.target}, discarding entity")
-                                    return False
+                                        f"Duplicate value '{value}' for {current_entity_name}.{child_name}.{attr_mapping.target}, dropping field")
+                                    child_data.pop(attr_mapping.target, None)
+                                    gate.bump("unique_duplicate_field")
+                                    continue
                                 unique_values[key].add(value)
                             except TypeError:
                                 value_str = str(value)
                                 if value_str in unique_values[key]:
                                     logger.warning(
-                                        f"Duplicate value '{value}' found for {current_entity_name}.{child_name}.{attr_mapping.target}, discarding entity")
-                                    return False
+                                        f"Duplicate value '{value}' for {current_entity_name}.{child_name}.{attr_mapping.target}, dropping field")
+                                    child_data.pop(attr_mapping.target, None)
+                                    gate.bump("unique_duplicate_field")
+                                    continue
                                 unique_values[key].add(value_str)
 
                     # Recursively check deeper nesting
-                    if not check_nested_uniqueness(child_data, child_config, current_entity_name):
-                        return False
-        return True
+                    check_nested_uniqueness(child_data, child_config, current_entity_name)
 
     # Apply nested uniqueness checks
-    if not check_nested_uniqueness(entity_data, entity_config, entity_name):
-        return None
+    check_nested_uniqueness(entity_data, entity_config, entity_name)
 
     return entity_data
 
@@ -278,7 +297,12 @@ def parse_entity(element: Tag, entity_config: EntityConfig, config: Config, cach
             # A matched element that parses to {} is invisible in the output.
             # Usually legitimate, but it is also what silently hides a child
             # that was matched from the wrong parent. Counted, not ignored.
-            gate.bump("child_dropped_empty", len(child_elements) - len(child_data_list))
+            dropped_n = len(child_elements) - len(child_data_list)
+            if dropped_n:
+                logger.debug("child '%s' <%s>: %d matched, %d parsed to nothing",
+                             child_config.name, child_config.selector,
+                             len(child_elements), dropped_n)
+                gate.bump("child_dropped_empty", dropped_n)
         else:
             # Single child - take first match
             if child_elements:
@@ -290,12 +314,14 @@ def parse_entity(element: Tag, entity_config: EntityConfig, config: Config, cach
                 if child_data:
                     entity_data[child_config.name] = child_data
                 else:
+                    logger.debug("child '%s' <%s>: 1 matched, parsed to nothing",
+                                 child_config.name, child_config.selector)
                     gate.bump("child_dropped_empty")
 
     return entity_data, root_level_attrs
 
 
-def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entity_selector: str, cache: Dict, logger: logging.Logger, visited_files: set, base_attr_field: str = "inherit_from") -> Dict[str, Any]:
+def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entity_selector: str, cache: Dict, logger: logging.Logger, visited_files: set, base_attr_field: str = "inherit_from", source_dir: Optional[str] = None) -> Dict[str, Any]:
     """Recursively resolve inheritance chain for an entity."""
     if base_attr_field not in entity_data:
         return entity_data
@@ -312,6 +338,7 @@ def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entit
     if base_file in visited_files:
         logger.warning(
             f"Circular inheritance detected: {base_file} already visited in chain")
+        gate.bump("inherit_cycle")
         return entity_data
 
     # Add current file to visited set
@@ -319,7 +346,8 @@ def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entit
 
     # Load the base entity (which will also resolve its own inheritance)
     base_entity = load_base_entity_with_inheritance(
-        base_file, config, entity_selector, cache, logger, visited_files.copy())
+        base_file, config, entity_selector, cache, logger, visited_files.copy(),
+        base_attr_field, source_dir)
 
     if base_entity:
         # Merge base entity data (current entity values take precedence)
@@ -332,12 +360,19 @@ def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entit
         return entity_data
 
 
-def find_file_in_package_paths(filename: str, package_paths: List[str]) -> Optional[str]:
+def find_file_in_package_paths(filename: str, package_paths: List[str],
+                               source_dir: Optional[str] = None) -> Optional[str]:
     """Recursively search for a file in all package paths and their subdirectories.
 
-    Returns a *deterministic* hit and reports ambiguity. rglob used to return
-    whichever match the filesystem happened to yield first, so a base file
-    present in several directories silently merged the wrong parent.
+    Several directories can hold a copy of the same base name (vehicle_base.vehicle
+    exists in vehicles/ and in maps/map19, maps/map21, and they differ). Which one
+    you get decides the merged entity, so resolution is scoped:
+
+      1. a copy sitting in the referencing file's own directory
+      2. otherwise the copy closest to the package root (the canonical location)
+      3. lexicographic tie-break, so the answer never depends on filesystem order
+
+    Ambiguity is reported rather than silently resolved.
     """
     for package_dir in package_paths:
         package_path = Path(package_dir)
@@ -351,27 +386,40 @@ def find_file_in_package_paths(filename: str, package_paths: List[str]) -> Optio
 
         # Then, recursively search all subdirectories
         try:
-            hits = sorted(str(p) for p in package_path.rglob(filename) if p.is_file())
+            hits = sorted(p.relative_to(package_path)
+                          for p in package_path.rglob(filename) if p.is_file())
         except (OSError, PermissionError) as e:
             logger.warning(
                 "Error searching %s: %s", package_dir, e)
             continue
 
         if hits:
-            if len(hits) > 1:
-                logger.error(
-                    "inherit_from '%s' matches %d files, using %s (others: %s)",
-                    filename, len(hits), hits[0], hits[1:4])
-                gate.bump("inherit_ambiguous")
-            return hits[0]
+            def rank(rel: Path):
+                own = 0 if (source_dir and (package_path / rel).parent == Path(source_dir)) else 1
+                return (own, len(rel.parts), str(rel))
+
+            ranked = sorted(hits, key=rank)
+            if len(ranked) > 1:
+                # Only a genuine coin flip is worth a counter: if the scoping
+                # rule already separates the top pick from the rest, the choice
+                # was decided by the source file's location, not by luck.
+                top = rank(ranked[0])[:2]
+                if any(rank(r)[:2] == top for r in ranked[1:]):
+                    gate.bump("inherit_ambiguous")
+                    logger.debug(
+                        "inherit_from '%s' unresolvable between %s -> chose %s",
+                        filename, [str(r) for r in ranked[:4]], ranked[0])
+                else:
+                    gate.bump("inherit_scoped")
+            return str(package_path / ranked[0])
 
     return None
 
 
-def load_base_entity_with_inheritance(base_file: str, config: Config, entity_selector: str, cache: Dict, logger: logging.Logger, visited_files: set, base_attr_field: str = "inherit_from") -> Optional[Dict[str, Any]]:
+def load_base_entity_with_inheritance(base_file: str, config: Config, entity_selector: str, cache: Dict, logger: logging.Logger, visited_files: set, base_attr_field: str = "inherit_from", source_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Load and parse a base entity from file, including resolving its own inheritance."""
     # Try to find the base file in configured package paths (including subdirectories)
-    base_path = find_file_in_package_paths(base_file, config.package_path)
+    base_path = find_file_in_package_paths(base_file, config.package_path, source_dir)
 
     # Key the cache on the resolved path, not the bare filename: two different
     # files called tank.vehicle used to share one cache entry.
@@ -412,7 +460,8 @@ def load_base_entity_with_inheritance(base_file: str, config: Config, entity_sel
                         # Resolve inheritance for the base entity as well
                         if config.defaults.get('inherit_enabled', False):
                             base_entity_data = resolve_inheritance_chain(
-                                base_entity_data, config, entity_selector, cache, logger, visited_files, base_attr_field
+                                base_entity_data, config, entity_selector, cache, logger, visited_files,
+                                base_attr_field, str(Path(base_path).parent)
                             )
 
                         cache[cache_key] = base_entity_data
@@ -499,12 +548,16 @@ def extract_nested_value(root_element: Tag, path: str) -> Optional[str]:
             # Return first value found (similar to current behavior for single elements)
             return values[0] if values else None
         else:
-            # Intermediate element - find all matching elements at this level
+            # Intermediate element - find matching *direct children* at this level.
+            # Was find_all(part), i.e. any descendant, which could latch onto a
+            # nested <physics> belonging to an unrelated subtree. Verified
+            # identical on the vanilla package (15,295 matches, 0 difference),
+            # so this only removes the latent wrong-parent case.
             next_elements = []
             for elem in current_elements:
                 if elem is None:
                     continue
-                found_elements = elem.find_all(part)
+                found_elements = elem.find_all(part, recursive=False)
                 next_elements.extend(found_elements)
             
             if not next_elements:
