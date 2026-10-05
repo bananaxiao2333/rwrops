@@ -1,30 +1,95 @@
 # result.json 数据结构参考文档
 
-> 由 rwrops 解析器自动生成的数据结构说明，用于 UI 构建参考。
+> **本文档是 rwrops 输出的唯一契约。** 消费者（webhelper / rwrops-bot / 其他）一律以本文为准；
+> 不要在别处再抄一份——历史上 `output_schema.md` 曾存在两份副本，靠人手同步。
+
+- 当前版本：**schema 2**
+- 生成方：`rwrops/main.py`（`SCHEMA_VERSION`）
+- 各实体字段清单见下文 §1 起；**字段本身未变**，变的是外层信封与记录身份。
 
 ---
 
 ## 顶层结构
 
-`result.json` 是一个字典，键为实体类型名，值为按 `key` 索引的字典：
-
 ```json
 {
-  "vehicle":     { "humvee.vehicle": {...}, ... },    // 305 条
-  "weapon":      { "aa-12.weapon": {...}, ... },       // 427 条
-  "projectile":  { "frag_grenade.projectile": {...}, ... }, // 287 条
-  "carry_item":  { "health_pack.carry_item": {...}, ... },  // 537 条
-  "call":        { "humvee.call": {...}, ... },         // 31 条
-  "achievement": { "destroyer": {...}, ... },           // 21 条
-  "faction":     { "Brownpants": {...}, ... }           // 5 条
+  "schema": 2,
+  "counts": { "vehicle": 379, "weapon": 432, "carry_item": 622, ... },
+  "records": [
+    {
+      "id": "vehicle:radio_jammer.vehicle@maps/map13/radio_jammer.vehicle",
+      "type": "vehicle",
+      "key": "radio_jammer.vehicle",
+      "source": "maps/map13/radio_jammer.vehicle",
+      ...实体字段
+    }
+  ]
 }
 ```
 
-每条数据内部统一带 `"type": "<实体类型>"` 标记来源。
+### 为什么是平铺数组，不是 `{type: {key: 实体}}`
+
+旧的 `{type: {key: 实体}}` 形状**装不下现在的数据**：实测 2,063 条记录里有 **295 条的 `(type, key)` 重复**
+（`vehicle.radio_jammer.vehicle` 出现 **5 次**，`faction.Neutral` 4 次），因为同一个 key 可以定义在多个文件里。
+字典里一个 key 只能有一个值，所以那 295 条必然互相覆盖，且不报错。
+
+平铺是唯一无损的形状。**分组是消费者的选择，不是数据的属性**——需要 `{type: {key: ...}}` 就在客户端归组（见下）。
+
+### 每条记录的身份字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | **全局唯一、跨运行稳定**，形如 `type:key@source`。用它做引用/跳转/去重，不要用 `key` |
+| `type` | 实体类型名，与 `counts` 的键一致 |
+| `key` | 实体 key，**可能缺失**（如 `<vehicles>` 里的引用），也不能当唯一标识 |
+| `source` | 包内**相对**路径（如 `vehicles/jeep.vehicle`）。绝不写绝对路径 |
+
+`id` 稳定意味着它不随文件遍历顺序变化，可以安全地存进用户配置或外部链接。
+
+### 注意事项
+
+- **`schema` 必须检查。** 遇到不认识的版本请直接报错，不要猜着读——静默读错比崩溃难查得多。
+- **没有时间戳。** 构建时间在 `metadata.yaml` 的 `timestamp`（消费者本就会拉这个文件）。
+  `result.json` 刻意保持逐字节可复现，门禁依赖这一点。
+- **同一 `key` 的多条记录是正常的**，它们来自不同文件，代表不同的定义/引用/补丁。
+  聚合会让信息消失，不要聚合。
+
+### 消费者适配示例
+
+平铺 → 应用常见的 `{type: {key: 实体}}` 视图，约 8 行：
+
+```js
+// JS
+function index(records) {
+  const out = {};
+  for (const r of records) {
+    const t = r.type ?? "unknown";
+    (out[t] ??= {})[r.key ?? r.id] ??= r;   // 同 key 取第一条；要全部就改成数组
+  }
+  return out;
+}
+const raw = await (await fetch(url)).json();
+if (raw.schema !== 2) throw new Error(`unsupported schema ${raw.schema}`);
+const data = index(raw.records);
+```
+
+```python
+# Python
+def index(records):
+    out = {}
+    for r in records:
+        out.setdefault(r.get("type", "unknown"), {}).setdefault(r.get("key") or r.get("id"), r)
+    return out
+
+raw = httpx.get(url).json()
+if raw["schema"] != 2:
+    raise RuntimeError(f"unsupported schema {raw['schema']}")
+data = index(raw["records"])
+```
 
 ---
 
-## 1. vehicle — 载具（305 条）
+## 1. vehicle — 载具（379 条）
 
 ### 字段清单
 

@@ -101,11 +101,41 @@ def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: 
                         except KeyError:
                             pass  # skip if template vars missing
 
-                # Add type information
+                # Identity. Two files can define the same key -- wiesel_spawn.vehicle
+                # exists in both vehicles/ and weapons/ with a different name -- so
+                # key alone is not unique and cannot be used as an address.
+                rel = rel_source(source_path, config.package_path)
                 entity_data["type"] = entity_config_obj.name
+                entity_data["source"] = rel
+                entity_data["id"] = "%s:%s@%s" % (
+                    entity_config_obj.name,
+                    entity_data.get("key") or entity_data.get("name") or "?",
+                    rel or "?",
+                )
                 temp.final.append(entity_data)
+                if not any(k not in ("type", "source", "id") for k in entity_data):
+                    # Matched the selector but carries none of the configured
+                    # attributes. Kept (identity is useful) but counted.
+                    gate.bump("entity_empty")
 
     return temp
+
+
+def rel_source(source_path: Optional[str], package_paths: List[str]) -> Optional[str]:
+    """Package-relative source path.
+
+    Absolute paths must not leak into the output: the deployed metadata.yaml was
+    carrying the build machine's /Users/<name>/... path.
+    """
+    if not source_path:
+        return None
+    p = Path(source_path)
+    for pp in package_paths:
+        try:
+            return p.relative_to(Path(pp)).as_posix()
+        except ValueError:
+            continue
+    return p.name
 
 
 def apply_uniqueness_constraints(entity_data: Dict[str, Any], entity_config: EntityConfig, entity_name: str, unique_values: Dict[Tuple[str, str], Set[Any]], logger: logging.Logger) -> Optional[Dict[str, Any]]:
@@ -360,60 +390,66 @@ def resolve_inheritance_chain(entity_data: Dict[str, Any], config: Config, entit
         return entity_data
 
 
+_INDEX_CACHE: Dict[Tuple[str, ...], Dict[str, List[Tuple[int, Path]]]] = {}
+
+
+def _package_index(package_paths: List[str]) -> Dict[str, List[Tuple[int, Path]]]:
+    """basename -> [(package_index, path relative to that package)].
+
+    Built once. Collecting every rglob hit per lookup instead would walk the
+    whole 720 MB package for each of the ~350 inheritance resolutions.
+    """
+    key = tuple(package_paths)
+    idx = _INDEX_CACHE.get(key)
+    if idx is None:
+        idx = {}
+        for pi, package_dir in enumerate(package_paths):
+            pp = Path(package_dir)
+            if not pp.exists():
+                continue
+            for root, _dirs, files in os.walk(pp):
+                for fn in files:
+                    idx.setdefault(fn, []).append((pi, Path(root, fn).relative_to(pp)))
+        _INDEX_CACHE[key] = idx
+    return idx
+
+
 def find_file_in_package_paths(filename: str, package_paths: List[str],
                                source_dir: Optional[str] = None) -> Optional[str]:
-    """Recursively search for a file in all package paths and their subdirectories.
+    """Resolve a base filename to a file, deterministically.
 
     Several directories can hold a copy of the same base name (vehicle_base.vehicle
     exists in vehicles/ and in maps/map19, maps/map21, and they differ). Which one
     you get decides the merged entity, so resolution is scoped:
 
       1. a copy sitting in the referencing file's own directory
-      2. otherwise the copy closest to the package root (the canonical location)
+      2. otherwise the earliest package, then the copy closest to the package root
       3. lexicographic tie-break, so the answer never depends on filesystem order
-
-    Ambiguity is reported rather than silently resolved.
     """
-    for package_dir in package_paths:
-        package_path = Path(package_dir)
-        if not package_path.exists():
-            continue
+    hits = _package_index(package_paths).get(filename)
+    if not hits:
+        return None
 
-        # First, check if file exists directly in package root
-        direct_path = package_path / filename
-        if direct_path.exists():
-            return str(direct_path)
+    def rank(hit: Tuple[int, Path]):
+        pi, rel = hit
+        own = 0 if (source_dir and (Path(package_paths[pi]) / rel).parent == Path(source_dir)) else 1
+        return (own, pi, len(rel.parts), str(rel))
 
-        # Then, recursively search all subdirectories
-        try:
-            hits = sorted(p.relative_to(package_path)
-                          for p in package_path.rglob(filename) if p.is_file())
-        except (OSError, PermissionError) as e:
-            logger.warning(
-                "Error searching %s: %s", package_dir, e)
-            continue
+    ranked = sorted(hits, key=rank)
+    if len(ranked) > 1:
+        # Only a genuine coin flip is worth a counter: if the scoping rule
+        # already separates the top pick from the rest, the source file's
+        # location decided it, not luck.
+        top = rank(ranked[0])[:3]
+        if any(rank(r)[:3] == top for r in ranked[1:]):
+            gate.bump("inherit_ambiguous")
+            logger.debug("inherit_from '%s' unresolvable between %s -> chose %s",
+                         filename, [str(r) for r in ranked[:4]], ranked[0])
+        else:
+            gate.bump("inherit_scoped")
 
-        if hits:
-            def rank(rel: Path):
-                own = 0 if (source_dir and (package_path / rel).parent == Path(source_dir)) else 1
-                return (own, len(rel.parts), str(rel))
-
-            ranked = sorted(hits, key=rank)
-            if len(ranked) > 1:
-                # Only a genuine coin flip is worth a counter: if the scoping
-                # rule already separates the top pick from the rest, the choice
-                # was decided by the source file's location, not by luck.
-                top = rank(ranked[0])[:2]
-                if any(rank(r)[:2] == top for r in ranked[1:]):
-                    gate.bump("inherit_ambiguous")
-                    logger.debug(
-                        "inherit_from '%s' unresolvable between %s -> chose %s",
-                        filename, [str(r) for r in ranked[:4]], ranked[0])
-                else:
-                    gate.bump("inherit_scoped")
-            return str(package_path / ranked[0])
-
-    return None
+    pi, rel = ranked[0]
+    return str(Path(package_paths[pi]) / rel)
 
 
 def load_base_entity_with_inheritance(base_file: str, config: Config, entity_selector: str, cache: Dict, logger: logging.Logger, visited_files: set, base_attr_field: str = "inherit_from", source_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
