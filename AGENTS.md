@@ -161,10 +161,12 @@ CLI 已安装：`edgeone`（v1.6.13，`edgeone whoami` 应显示 `banana.xiao@qq
 
 ### 5.1 两个站点
 
-| 站点 | 目录 | 项目 |
-| --- | --- | --- |
-| **数据**（`dist/`，供 webhelper 跨域拉取） | `RWR/rwrops/dist` | 见下 |
-| **前端**（React SPA） | `RWR/rwrops_webhelper/dist` | `rwropswh` / `pages-fj64cuxx2y1z`（记录在 `.edgeone/project.json`） |
+| 站点 | 部署目录 | 项目名 | 项目 ID | 线上地址 |
+| --- | --- | --- | --- | --- |
+| **数据** | `RWR/rwrops/dist` | `rwrops` | `makers-yfee59lv76jg` | `https://rwr-static.079682.xyz`（自定义域名） |
+| **前端** | `RWR/rwrops_webhelper/dist` | `rwropswh` | `pages-fj64cuxx2y1z` | `https://rwropswh.edgeone.dev` |
+
+两个项目都已有 `.edgeone/project.json` 记录绑定。
 
 ### 5.2 部署
 
@@ -178,9 +180,13 @@ cd RWR/rwrops_webhelper
 npm run build && edgeone pages deploy dist
 ```
 
-> ⚠️ **`rwrops/.edgeone/` 里没有 `project.json`**（只有上次部署的 assets 缓存），
-> 而 webhelper 有。所以首次从本机部署数据站时，CLI 可能要求重新选择项目 ——
-> **确认项目名再回车**，选错会新建一个站点。稳妥做法是先 `edgeone pages link`。
+> ### ⚠️ 绝对不要用 `--name` 去"试"项目名
+>
+> `edgeone pages deploy --name <x>` **在项目不存在时会直接新建一个项目**，不会询问。
+> 猜项目名 = 凭空多一个站点，而且 **CLI 没有删除项目的命令**，只能去控制台手工删。
+>
+> 项目名已写在 `.edgeone/project.json`（已提交）。若文件丢失，去
+> <https://console.tencentcloud.com/edgeone/pages> 查，不要靠试探。
 
 ### 5.3 `dist/edgeone.json` 是部署配置，不是构建产物
 
@@ -233,14 +239,12 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy di
 前提是两端都装了**过渡垫片**：新前端/新 bot 同时认旧形状（打 warning），
 这样顺序任意、数据与前端可各自独立回退。垫片在 schema 2 稳定一段时间后删掉。
 
-### 5.6 线上地址
+### 5.6 域名现状
 
-| 站点 | 地址 | 备注 |
-| --- | --- | --- |
-| 数据 | `https://rwr-static.079682.xyz` | 线上有效，前端与 bot 都从这里取数 |
-| 前端 | `https://rwrops.079682.xyz` | **当前 NXDOMAIN（连 8.8.8.8 也查不到）**，README 里的地址是旧的 |
+前端 README 里写的 `rwrops.079682.xyz` **是死的**（连 8.8.8.8 都 NXDOMAIN），
+真正能访问的是 EdgeOne 默认域名 `rwropswh.edgeone.dev`，见 §5.1。
 
-改前端域名时，记得同步 `rwrops_webhelper/README.md` 和 `scripts/generate-sitemap.js`。
+绑自定义域名时记得同步 `rwrops_webhelper/README.md` 和 `scripts/generate-sitemap.js`。
 
 ---
 
@@ -282,6 +286,8 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy di
 - ❌ 静默丢数据：`except: pass`、无计数的 `continue`、无理由的 `return None`。
 - ❌ 把用户既有的未提交改动一起提交。`git status` 先看清楚哪个文件是谁改的。
 - ❌ 未经确认 `git push`（本地提交可以，推送不行）。
+- ❌ 用 `edgeone pages deploy --name <猜的>` 试探项目名 —— 项目不存在时它会**直接新建**，
+  而 CLI 没有删除命令。项目名看 `.edgeone/project.json`（§5.2）。
 - ❌ 在 `dist/` 上做手工修改 —— 它是生成物，会被下次运行覆盖。
 
 **不确定时**：跑 §3.1 的工具、给出实测数字，再问。不要猜。
