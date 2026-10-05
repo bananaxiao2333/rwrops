@@ -43,9 +43,17 @@ def flat(obj, prefix="", out=None):
 
 
 def load(path):
-    """-> {type: {"keys": {key: fields} | None, "records": [fields] | None}}"""
+    """-> {type: {"keys": {key: fields} | None, "records": [fields] | None}}
+
+    Accepts the versioned envelope {schema, counts, records}, the bare flat
+    list, and the legacy {type: {key: entity}} dict.
+    """
     with open(path, encoding="utf-8") as f:
         obj = json.load(f)
+
+    schema = obj.get("schema") if isinstance(obj, dict) else None
+    if isinstance(obj, dict) and "records" in obj:
+        obj = obj["records"]
 
     types = {}
     if isinstance(obj, dict):
@@ -59,6 +67,9 @@ def load(path):
                 flat(rec) if isinstance(rec, dict) else {"_scalar": rec})
     else:
         raise SystemExit(f"{path}: expected dict or list at top level")
+
+    for entry in types.values():
+        entry["schema"] = schema
     return types
 
 

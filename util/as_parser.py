@@ -344,7 +344,7 @@ def run(
     Returns:
         {"commands": [...], "exchange_categories": [...]}
     """
-    result: dict = {"commands": [], "exchange_categories": []}
+    result: dict = {"commands": [], "exchange_categories": [], "command_source": None}
     dirs = search_dirs or []
 
     # ── resolve command source ────────────────────────────────
@@ -355,6 +355,7 @@ def run(
     if cp and cp.exists():
         logger.info("parsing commands from %s", cp)
         result["commands"] = parse_commands(cp)
+        result["command_source"] = str(cp)
     elif not cp:
         logger.info("command source not found (%s) — skipping", _COMMAND_FILENAME)
     else:

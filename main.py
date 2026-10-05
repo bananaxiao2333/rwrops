@@ -12,75 +12,16 @@ import yaml
 from util.Clogger import setup_logging
 from util.classes import Config, Temp
 from util.file_utils import file_reader, walk_dir, xml_parser_factory
-from util.ops import parse_file
+from util.ops import parse_file, rel_source
 from util.timer import timer
 from util import gate
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-
-def clean_final(temp: Temp, primarykey: str) -> Temp:
-    ret: Dict[str, Dict[str, Dict]] = {}
-
-    for item in temp.final:
-        type = item.get('type')
-        key = item.get(primarykey)
-
-        if type:
-            if not ret.get(type):
-                ret[type] = {}
-            if key:
-                if key in ret[type]:
-                    # Merge: lists append unique, scalar keep existing
-                    existing = ret[type][key]
-                    gate.bump("key_collision_merge")
-                    for k2, v2 in item.items():
-                        if isinstance(v2, list) and isinstance(existing.get(k2), list):
-                            seen = {str(e) for e in existing[k2]}
-                            for e in v2:
-                                if str(e) not in seen:
-                                    existing[k2].append(e)
-                                    seen.add(str(e))
-                        elif k2 not in existing:
-                            existing[k2] = v2
-                        elif existing[k2] != v2:
-                            # Scalar differs between two entities sharing a key.
-                            # First one wins (walk order), the other is dropped.
-                            gate.bump("key_collision_scalar_dropped")
-                else:
-                    ret[type][key] = item
-
-    # 对每个类别按照primarykey排序
-    sorted_ret: Dict[str, Dict[str, Dict]] = {}
-
-    for type_name, type_data in ret.items():
-        if not type_data:
-            sorted_ret[type_name] = {}
-            continue
-
-        def get_sort_key(item_key: str, item_data: Dict) -> Any:
-            """Try numeric sort, fall back to string. Returns (priority, value) tuple."""
-            sort_value = item_data.get(primarykey, item_key)
-            try:
-                return (0, int(sort_value))
-            except (ValueError, TypeError):
-                try:
-                    return (1, float(sort_value))
-                except (ValueError, TypeError):
-                    return (2, str(sort_value))
-
-        # 按照primarykey排序
-        sorted_items = sorted(
-            type_data.items(),
-            key=lambda x: get_sort_key(x[0], x[1])
-        )
-
-        # 创建新的字典
-        sorted_ret[type_name] = {k: v for k, v in sorted_items}
-
-    temp.sorted_final = sorted_ret
-    return temp
+# Bump when the shape of result.json changes in a way a consumer must know about.
+# Consumers should refuse a schema they do not understand rather than guess.
+SCHEMA_VERSION = 2
 
 
 @timer
@@ -159,10 +100,14 @@ def main_procces(config: Config):
             exch_path=Path(config.as_exchange_path) if config.as_exchange_path else None,
             search_dirs=search_dirs,
         )
-        # Inject commands as entities
+        # Inject commands as entities. They come from AngelScript, not XML, so
+        # they carry their own source and need the same identity fields.
+        cmd_src = rel_source(as_data.get("command_source"), config.package_path)
         for cmd in as_data.get("commands", []):
             cmd["type"] = "command_config"
             cmd["key"] = cmd["command"]
+            cmd["source"] = cmd_src
+            cmd["id"] = f"command_config:{cmd['command']}@{cmd_src or '?'}"
             temp.final.append(cmd)
         n_cmds = len(as_data.get("commands", []))
         n_exch = len(as_data.get("exchange_categories", []))
@@ -225,11 +170,13 @@ def main_procces(config: Config):
     for item in temp.final:
         _collect_refs(item)
 
-    # Sort / dedup data first
+    # Flat records, one per parsed node, never merged. Aggregate-by-key used to
+    # live here and silently dropped colliding scalars (65 of them measured); see
+    # output_schema.md. `sort` now sorts, it does not aggregate.
     to_dump = temp.final
     if config.sort.enable:
-        temp = clean_final(temp, config.sort.primarykey)
-        to_dump = temp.sorted_final
+        pk = config.sort.primarykey
+        to_dump = sorted(to_dump, key=lambda e: str(e.get(pk) or e.get("id") or ""))
 
     json_str = json.dumps(to_dump, ensure_ascii=False)
 
@@ -239,13 +186,9 @@ def main_procces(config: Config):
 
     # Build entity counts
     entity_counts = {}
-    if config.sort.enable and isinstance(to_dump, dict):
-        for etype, items in to_dump.items():
-            entity_counts[etype] = len(items) if isinstance(items, dict) else len(items) if isinstance(items, list) else 0
-    else:
-        for item in temp.final:
-            t = item.get("type", "unknown")
-            entity_counts[t] = entity_counts.get(t, 0) + 1
+    for item in to_dump:
+        t = item.get("type", "unknown")
+        entity_counts[t] = entity_counts.get(t, 0) + 1
 
     # Export referenced .res files to dist/assets/ with content-hash suffixes
     assets_dir = out_dir / "assets"
@@ -308,10 +251,20 @@ def main_procces(config: Config):
             return [_rewrite_refs(item) for item in obj]
         return obj
 
-    # Parse back, rewrite, re-serialize to avoid object-reference issues with sorted_final
+    # Parse back, rewrite, re-serialize so asset paths are rewritten throughout
     to_dump_rewritten = json.loads(json_str)
     to_dump_rewritten = _rewrite_refs(to_dump_rewritten)
-    json_str = json.dumps(to_dump_rewritten, ensure_ascii=False)
+
+    # Versioned envelope: a consumer that does not know this version can fail
+    # loudly instead of silently misreading the shape. Deliberately no timestamp
+    # here -- gate.sh compares result.json byte-for-byte across runs, and the
+    # build time already lives in metadata.yaml, which every consumer fetches.
+    payload = {
+        "schema": SCHEMA_VERSION,
+        "counts": entity_counts,
+        "records": to_dump_rewritten,
+    }
+    json_str = json.dumps(payload, ensure_ascii=False)
 
     # Asset index
     try:
@@ -326,8 +279,8 @@ def main_procces(config: Config):
 
     metadata = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "schema": SCHEMA_VERSION,
         "config_file": config.CONFIGFILE,
-        "source_paths": config.package_path,
         "entity_counts": entity_counts,
         "assets": {
             "exported": res_files_exported,
