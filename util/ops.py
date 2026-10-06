@@ -550,12 +550,6 @@ def apply_transform(value: str, transform: Optional[TransformType]) -> Any:
     return value
 
 
-def load_base_entity(base_file: str, config: Config, entity_selector: str, cache: Dict) -> Optional[Dict[str, Any]]:
-    """Legacy function maintained for backward compatibility - now delegates to new implementation."""
-    base_attr_field = config.defaults.get('base_attr', 'inherit_from')
-    return load_base_entity_with_inheritance(base_file, config, entity_selector, cache, logger, set(), base_attr_field)
-
-
 def extract_nested_value(root_element: Tag, path: str) -> Optional[str]:
     """Extract value from nested XML path like 'turret/@max_rotation_step' or 'projectile/result/@class'."""
     parts = path.split('/')
