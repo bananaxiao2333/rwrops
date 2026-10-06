@@ -172,17 +172,34 @@ CLI 已安装：`edgeone`（v1.6.13，`edgeone whoami` 应显示 `banana.xiao@qq
 
 ```bash
 cd RWR/rwrops
-./gate.sh && edgeone pages deploy dist        # 必须先过门禁
+./gate.sh && edgeone makers deploy dist       # 必须先过门禁
 ```
 
 ```bash
 cd RWR/rwrops_webhelper
-npm run build && edgeone pages deploy dist
+npm run build && edgeone makers deploy dist
 ```
+
+> ### ⚠️ 必须用 `edgeone makers deploy`，不要用 `edgeone pages deploy`
+>
+> `edgeone pages deploy` 是**已弃用的别名**：CLI 只打一行
+> `"edgeone pages" is deprecated. Use "edgeone makers" instead.`，然后照样上传、
+> 照样打印 `Deploy Success` 和一个 Deployment ID —— **但不会提升到 Production**。
+> 线上域名继续返回旧内容。
+>
+> 2026-10-07 实测：连续三次 `edgeone pages deploy` 全部报成功，线上
+> `metadata.yaml` 的 `language` 计数始终是旧值（23 而非 21）；同一条命令换成
+> `edgeone makers deploy` 后立即生效。
+>
+> **验证手法**：别信 `Deploy Success`，去比字节。
+> ```bash
+> curl -s "https://rwr-static.079682.xyz/metadata.yaml?x=$(date +%s%N)" \
+>   | diff - dist/metadata.yaml && echo CURRENT
+> ```
 
 > ### ⚠️ 绝对不要用 `--name` 去"试"项目名
 >
-> `edgeone pages deploy --name <x>` **在项目不存在时会直接新建一个项目**，不会询问。
+> `edgeone makers deploy --name <x>` **在项目不存在时会直接新建一个项目**，不会询问。
 > 猜项目名 = 凭空多一个站点，而且 **CLI 没有删除项目的命令**，只能去控制台手工删。
 >
 > 项目名已写在 `.edgeone/project.json`（已提交）。若文件丢失，去
@@ -225,8 +242,8 @@ curl -sS https://rwr-static.079682.xyz/result.json | shasum -a 256
 **回退：**
 
 ```bash
-cd RWR/rwrops && edgeone pages deploy ../_rollback/rwr-static-live   # 数据站
-cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy dist  # 前端
+cd RWR/rwrops && edgeone makers deploy ../_rollback/rwr-static-live   # 数据站
+cd RWR/rwrops_webhelper && git stash && npm run build && edgeone makers deploy dist  # 前端
 ```
 
 前端不需要镜像——它的源码在 git 里，回退就是 checkout 旧提交后重建。
@@ -291,7 +308,7 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone pages deploy di
 - ❌ 静默丢数据：`except: pass`、无计数的 `continue`、无理由的 `return None`。
 - ❌ 把用户既有的未提交改动一起提交。`git status` 先看清楚哪个文件是谁改的。
 - ❌ 未经确认 `git push`（本地提交可以，推送不行）。
-- ❌ 用 `edgeone pages deploy --name <猜的>` 试探项目名 —— 项目不存在时它会**直接新建**，
+- ❌ 用 `edgeone makers deploy --name <猜的>` 试探项目名 —— 项目不存在时它会**直接新建**，
   而 CLI 没有删除命令。项目名看 `.edgeone/project.json`（§5.2）。
 - ❌ 在 `dist/` 上做手工修改 —— 它是生成物，会被下次运行覆盖。
 
