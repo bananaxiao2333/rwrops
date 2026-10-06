@@ -27,6 +27,14 @@ exclude_patterns:
   - scripts.*
   - sounds
   - static_objects
+  # Editor / backup scratch. walk_dir yields every file it finds and the
+  # language selector matches on a path prefix, so a stray
+  # `misc_text_vanilla.xml.bak-<date>` sitting in the game folder is parsed as a
+  # *second* set of translations for that language and wins or loses at random.
+  # That reached production once. Cheap to exclude, expensive to notice.
+  - ".*\\.(bak|orig|rej|tmp|swp|save)([-.].*)?"
+  - ".*~"
+  - "\\..*\\.sw[a-p]"
 
 defaults:
   inherit_enabled: true
