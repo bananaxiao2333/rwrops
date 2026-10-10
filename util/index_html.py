@@ -599,3 +599,165 @@ def generate(
     index_path = out_dir / "index.html"
     index_path.write_text(html_content, encoding="utf-8")
     logger.info(f"Wrote index.html ({index_path.stat().st_size:,} bytes)")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Multi-package landing page
+# ══════════════════════════════════════════════════════════════════════════
+
+LANDING_CSS = r"""
+/* ── Package grid (multi-package landing) ────────────────────────────── */
+.pkg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+.pkg-card {
+  display: block;
+  text-decoration: none;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.9rem 1rem;
+  transition: border-color 0.12s var(--ease-out), transform 0.12s var(--ease-out);
+}
+.pkg-card:hover {
+  border-color: var(--accent-dim);
+  transform: translateY(-1px);
+}
+.pkg-card .pkg-id {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+.pkg-card .pkg-stats {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  margin-top: 0.35rem;
+}
+.pkg-card .pkg-layers {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 0.4rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.pkg-card .pkg-layers b { color: var(--text-secondary); font-weight: 500; }
+"""
+
+
+def generate_landing(
+    out_dir: Path,
+    packages: List[Dict[str, Any]],
+    metadata: Dict[str, Any],
+) -> None:
+    """Generate the root index.html — the package selector for the static build.
+
+    Each card links to `packages/<id>/index.html`, which the per-package
+    generator writes. This page deliberately holds no entity data: 22 packages
+    of inlined tables would be tens of megabytes of duplicated markup.
+    """
+    icon_src = _resolve_icon_src()
+    if icon_src:
+        try:
+            shutil.copy2(icon_src, out_dir / "icon.svg")
+        except Exception as e:
+            logger.warning(f"Failed to copy icon.svg: {e}")
+
+    ts = metadata.get("timestamp", datetime.now(timezone.utc).isoformat())
+    cfg = metadata.get("config_file", "?")
+    total_records = sum(p.get("records", 0) for p in packages)
+    assets = metadata.get("assets", {})
+
+    h: List[str] = []
+    h.append("<!DOCTYPE html>")
+    h.append('<html lang="en">')
+    h.append("<head>")
+    h.append('<meta charset="UTF-8">')
+    h.append('<link rel="icon" type="image/svg+xml" href="icon.svg">')
+    h.append('<meta name="viewport" content="width=device-width, initial-scale=1.0">')
+    h.append('<meta name="color-scheme" content="dark">')
+    h.append("<title>RWROPS — Package Index</title>")
+    h.append('<link rel="preconnect" href="https://fonts.googleapis.com">')
+    h.append('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>')
+    h.append(
+        '<link href="https://fonts.googleapis.com/css2?'
+        'family=Rajdhani:wght@400;500;600;700&'
+        'family=Share+Tech+Mono&display=swap" rel="stylesheet">'
+    )
+    h.append(f"<style>{CSS}{LANDING_CSS}</style>")
+    h.append("</head>")
+    h.append("<body>")
+
+    h.append("<header>")
+    h.append('  <img class="header-icon" src="icon.svg" alt="RWROPS" width="48" height="48">')
+    h.append('  <div class="header-text">')
+    h.append("    <h1>RWROPS PACKAGE INDEX</h1>")
+    h.append('    <div class="header-meta">')
+    h.append(f"      <span>GENERATED {html.escape(str(ts))}</span>")
+    h.append(f"      <span>CONFIG {html.escape(str(cfg))}</span>")
+    h.append("    </div>")
+    h.append("  </div>")
+    h.append("</header>")
+    h.append('<div class="header-accent-line"></div>')
+
+    h.append("<main>")
+    h.append('<h2 class="section-title">BUILD SUMMARY</h2>')
+    h.append('<div class="summary">')
+    for count, label in (
+        (len(packages), "packages"),
+        (total_records, "records"),
+        (assets.get("written", 0), "assets"),
+        (assets.get("deduplicated", 0), "deduplicated"),
+    ):
+        h.append('  <div class="summary-card">')
+        h.append(f'    <div class="count">{count}</div>')
+        h.append(f'    <div class="label">{html.escape(label)}</div>')
+        h.append("  </div>")
+    h.append("</div>")
+
+    h.append('<h2 class="section-title">PACKAGES</h2>')
+    if packages:
+        h.append('<div class="pkg-grid">')
+        for p in packages:
+            pid = str(p.get("id", "?"))
+            layers = p.get("layers") or [pid]
+            counts = p.get("counts") or {}
+            top = ", ".join(
+                f"{t} {n}" for t, n in sorted(counts.items(), key=lambda kv: -kv[1])[:4]
+            )
+            h.append(f'  <a class="pkg-card" href="packages/{html.escape(pid)}/index.html">')
+            h.append(f'    <div class="pkg-id">{html.escape(pid)}</div>')
+            h.append(
+                f'    <div class="pkg-stats">{p.get("records", 0):,} records'
+                f' &middot; {p.get("assets", 0):,} assets</div>'
+            )
+            h.append(
+                '    <div class="pkg-layers"><b>layers</b> '
+                f'{html.escape(" + ".join(str(x) for x in layers))}</div>'
+            )
+            if top:
+                h.append(f'    <div class="pkg-layers">{html.escape(top)}</div>')
+            h.append("  </a>")
+        h.append("</div>")
+    else:
+        h.append('<div class="empty">NO PACKAGES FOUND</div>')
+
+    h.append("</main>")
+    h.append("<footer>")
+    h.append(
+        f"  RWROPS &copy; {datetime.now().year} &mdash; "
+        f"{len(packages)} PACKAGES, {total_records} RECORDS"
+    )
+    h.append("</footer>")
+    h.append("</body>")
+    h.append("</html>")
+
+    index_path = out_dir / "index.html"
+    index_path.write_text("\n".join(h) + "\n", encoding="utf-8")
+    logger.info(f"Wrote landing index.html ({index_path.stat().st_size:,} bytes)")
+

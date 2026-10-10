@@ -1,20 +1,21 @@
-from ast import List
 import hashlib
 import json
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 import yaml
 from util.Clogger import setup_logging
 from util.classes import Config, Temp
 from util.file_utils import file_reader, walk_dir, xml_parser_factory
-from util.ops import parse_file, rel_source
+from util.ops import parse_file, rel_source, relative_to_roots
 from util.timer import timer
 from util import gate
+from util import packages as pkgmod
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -23,53 +24,112 @@ logger = logging.getLogger(__name__)
 # Consumers should refuse a schema they do not understand rather than guess.
 SCHEMA_VERSION = 2
 
+DIST = Path("dist")
+PACKAGES_DIR = DIST / "packages"
+ASSETS_DIR = DIST / "assets"
+
+#: Top-level entries of dist/ that are hand-managed, not generated. A build
+#: clears everything else under dist/ so a removed package cannot linger.
+#: Gate baselines deliberately live in `.gate/` at the repo root instead —
+#: anything left in dist/ is uploaded to the CDN.
+DIST_KEEP = {".edgeone", "edgeone.json", ".gitignore", ".env", ".cursor",
+             "CNAME", "_redirects"}
+
+
+class AssetPool:
+    """`dist/assets/` — one content-addressed pool shared by every package.
+
+    Vanilla alone exports ~1,000 files and 87 MB, and every overlay package
+    references nearly the same set. Per-package asset directories would copy
+    those bytes 20-odd times, so the pool is global: the flat name is derived
+    from (package-relative path, content hash), which means the same texture
+    reached through `vanilla/textures/` and through `classic`'s layer stack
+    resolves to the *same* destination file and is written once.
+
+    Same path + different content (a genuine override) hashes differently and
+    therefore gets its own file, which is what the overlay semantics require.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self._by_src: Dict[str, str] = {}
+        self.written = 0
+        self.reused = 0
+
+    def export(self, src: Path, rel_posix: str) -> str:
+        cached = self._by_src.get(str(src))
+        if cached is not None:
+            self.reused += 1
+            return cached
+
+        raw = src.read_bytes()
+        chash = hashlib.sha256(raw).hexdigest()[:8]
+        base_name = rel_posix.replace("\\", "_").replace("/", "_")
+        stem = Path(base_name).stem
+        suffix = Path(base_name).suffix
+        safe_name = f"{stem}-{chash}{suffix}"
+
+        destination = self.root / safe_name
+        if destination.exists():
+            # Same bytes reached through a different layer root (two packages
+            # shipping an identical texture under different names).
+            self.reused += 1
+        else:
+            destination.write_bytes(raw)
+            self.written += 1
+        self._by_src[str(src)] = safe_name
+        return safe_name
+
+
+def classify(paths: Iterable[Path]) -> Temp:
+    """Split a file list into XML-ish configs and resources.
+
+    Content-sniffed, not extension-matched: RWR's entity files are `.vehicle`,
+    `.weapon`, `.projectile`, `.call`, ... and all of them are XML.
+    """
+    temp = Temp()
+    for path in paths:
+        try:
+            data = file_reader(path, size=5)
+            if data.startswith("<"):
+                # SVG is XML, so it sniffs as a config file — but it is an
+                # asset. `map_config.objects_svg` points at maps/<key>/objects.svg
+                # (19 files, 96 MB) and the frontend renders it as the map
+                # object-layout overlay. Treating it as a config both failed to
+                # parse it and left the field pointing at nothing, so every map
+                # showed a broken image.
+                if path.suffix.lower() == '.svg':
+                    temp.res_file.append(str(path))
+                    continue
+                temp.conf_file.append(str(path))
+            else:
+                raise RuntimeError
+        except Exception:
+            temp.res_file.append(str(path))
+    return temp
+
+
+def collect_resources(config: Config) -> Iterable[Path]:
+    for p in config.package_path:
+        yield from walk_dir(Path(p), config.exclude_patterns)
+
 
 @timer
-def main_procces(config: Config):
-    temp = Temp()
+def parse_package(
+    config: Config,
+    *,
+    out_dir: Path,
+    pool: AssetPool,
+    temp: Temp,
+    parse_paths: List[str],
+) -> Dict[str, Any]:
+    """Parse one package's already-resolved file set and write its dataset.
+
+    `temp` arrives pre-classified (conf_file + res_file) so the caller decides
+    which files belong to the package. `parse_paths` is that package's layer
+    roots, mod-first, used for `inherit_from` resolution and `_source`.
+    """
     log = logging.getLogger(__name__)
-    log.info("processing config '%s'", config.CONFIGFILE)
-
-    @timer
-    def scan(config: Config, temp: Temp) -> Temp:
-        # Scan main packages
-        for src_name, src_paths in [("package", config.package_path), ("plugin", config.plugin_paths)]:
-            if not src_paths:
-                continue
-            for p in src_paths:
-                log.debug(f"walking in {src_name} '{p}'")
-                for path in walk_dir(Path(p), config.exclude_patterns):
-                    try:
-                        data = file_reader(path, size=5)
-                        if data.startswith("<"):
-                            # SVG files disabled — too large for asset export
-                            if path.suffix.lower() == '.svg':
-                                continue
-                            temp.conf_file.append(str(path))
-                        else:
-                            raise RuntimeError
-                    except:
-                        temp.res_file.append(str(path))
-                        continue
-        return temp
-
-    temp: Temp = scan(config, temp)
-
-    log.debug(
-        f"configuration: {len(temp.conf_file)} resource: {len(temp.res_file)} ")
-    conf_type = {}
-    for item in temp.conf_file:
-        conf_type[str(os.path.basename(item)).split(".")[1]] = 0
-    res_type = {}
-    for item in temp.res_file:
-        try:
-            res_type[str(os.path.basename(item)).split(".")[1]] = 0
-        except:
-            pass
-    log.debug(
-        f"configuration types: {list(conf_type.keys())} ")
-    log.debug(
-        f"resource: {list(res_type.keys())} ")
 
     with tqdm(range(len(temp.conf_file)), desc="Files") as pbar:
         for item in temp.conf_file:
@@ -88,21 +148,14 @@ def main_procces(config: Config):
     try:
         from util.as_parser import run as run_as_parser
 
-        # Build search dirs from package_path + plugin_paths
-        search_dirs: list[Path] = []
-        for p in config.package_path:
-            search_dirs.append(Path(p))
-        for p in config.plugin_paths:
-            search_dirs.append(Path(p))
-
         as_data = run_as_parser(
             cmd_path=Path(config.as_command_path) if config.as_command_path else None,
             exch_path=Path(config.as_exchange_path) if config.as_exchange_path else None,
-            search_dirs=search_dirs,
+            search_dirs=[Path(p) for p in parse_paths],
         )
         # Inject commands as entities. They come from AngelScript, not XML, so
         # they carry their own source and need the same identity fields.
-        cmd_src = rel_source(as_data.get("command_source"), config.package_path)
+        cmd_src = rel_source(as_data.get("command_source"), parse_paths)
         for cmd in as_data.get("commands", []):
             cmd["type"] = "command_config"
             cmd["key"] = cmd["command"]
@@ -116,7 +169,7 @@ def main_procces(config: Config):
         # Attach exchange data: forward (this → prizes) and reverse (prize → source)
         for cat in as_data.get("exchange_categories", []):
             cat_name = cat.get("category", "")
-            pools = cat.get("prize_pools", [])
+            prize_pools = cat.get("prize_pools", [])
 
             # Forward: input items → what prizes you get
             for inp in cat.get("input", []):
@@ -129,13 +182,13 @@ def main_procces(config: Config):
                             entity["exchange_prizes"] = []
                         entity["exchange_prizes"].append({
                             "category": cat_name,
-                            "prize_pools": pools,
+                            "prize_pools": prize_pools,
                         })
                         break
 
             # Reverse: prize items → which categories they come from
-            for pool in pools:
-                for prize in pool:
+            for pool_entry in prize_pools:
+                for prize in pool_entry:
                     p_key = prize.get("key", "")
                     if not p_key:
                         continue
@@ -157,6 +210,7 @@ def main_procces(config: Config):
 
     # Collect all referenced filenames from entity data (recursive)
     refs = set()
+
     def _collect_refs(obj):
         if isinstance(obj, str):
             refs.add(obj)
@@ -167,6 +221,7 @@ def main_procces(config: Config):
         elif isinstance(obj, list):
             for item in obj:
                 _collect_refs(item)
+
     for item in temp.final:
         _collect_refs(item)
 
@@ -180,37 +235,26 @@ def main_procces(config: Config):
 
     json_str = json.dumps(to_dump, ensure_ascii=False)
 
-    # Create flat dist/ output folder
-    out_dir = Path("dist")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # Build entity counts
-    entity_counts = {}
+    entity_counts: Dict[str, int] = {}
     for item in to_dump:
         t = item.get("type", "unknown")
         entity_counts[t] = entity_counts.get(t, 0) + 1
 
-    # Export referenced .res files to dist/assets/ with content-hash suffixes
-    assets_dir = out_dir / "assets"
-    if assets_dir.exists():
-        import shutil
-        shutil.rmtree(assets_dir, ignore_errors=True)
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    asset_map = {}
-    rel_path_map = {}  # bare/asset_name → relative path, for rewriting result.json
+    # Export referenced .res files into the shared pool
+    asset_map: Dict[str, str] = {}
+    rel_path_map: Dict[str, str] = {}  # bare/asset_name → relative path
     res_files_exported = 0
     skipped = 0
     for res_file_path in temp.res_file:
         res_path = Path(res_file_path)
-        rel_path = res_path.name
-        for pp in config.package_path:
-            pp_path = Path(pp)
-            try:
-                rel_path = str(res_path.relative_to(pp_path))
-                break
-            except ValueError:
-                continue
-        rel_posix = rel_path.replace("\\", "/")
+        # Deepest root wins, not first match. `parse_paths` is mod-first, so a
+        # package's own directory precedes its `packages/<dep>` override mounts:
+        # first-match keyed `classic/packages/vanilla/maps/map11/map.png` as
+        # `packages/vanilla/maps/map11/map.png`, which no record references, so
+        # it failed the filter below and was dropped. That silently killed the
+        # map icon for the 10 maps classic overrides.
+        rel_posix = relative_to_roots(res_path, parse_paths) or res_path.name
         asset_name = rel_posix.replace("/", "_").replace("\\", "_")
         if rel_posix not in refs and res_path.name not in refs and asset_name not in refs:
             skipped += 1
@@ -224,24 +268,14 @@ def main_procces(config: Config):
             if alias not in rel_path_map:
                 rel_path_map[alias] = rel_posix
 
-        # Read content and compute hash
-        raw = res_path.read_bytes()
-        chash = hashlib.sha256(raw).hexdigest()[:8]
-
-        base_name = rel_posix.replace("\\", "_").replace("/", "_")
-        stem = Path(base_name).stem
-        suffix = Path(base_name).suffix
-        safe_name = f"{stem}-{chash}{suffix}"
-        destination = assets_dir / safe_name
-
         try:
-            destination.write_bytes(raw)
+            asset_map[rel_posix] = pool.export(res_path, rel_posix)
             res_files_exported += 1
-            asset_map[rel_posix] = destination.name
         except Exception as e:
-            log.warning(f"Failed to copy {res_file_path} to {destination}: {e}")
+            log.warning(f"Failed to export {res_file_path}: {e}")
+            gate.bump("asset_export_failed")
 
-    # Rewrite result.json references to use relative paths (matching _index.json keys)
+    # Rewrite result.json references to use relative paths (matching assets.json keys)
     def _rewrite_refs(obj: Any) -> Any:
         if isinstance(obj, str):
             return rel_path_map.get(obj, obj)
@@ -266,14 +300,15 @@ def main_procces(config: Config):
     }
     json_str = json.dumps(payload, ensure_ascii=False)
 
-    # Asset index
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-package asset index: package-relative path → flat name in the shared pool.
     try:
-        with open(assets_dir / "_index.json", "w", encoding="utf-8") as f:
+        with open(out_dir / "assets.json", "w", encoding="utf-8") as f:
             json.dump(asset_map, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.warning(f"Failed to write asset index: {e}")
 
-    # result.json + metadata.yaml
     with open(out_dir / "result.json", 'w', encoding='utf-8') as f:
         f.write(json_str)
 
@@ -291,7 +326,7 @@ def main_procces(config: Config):
     with open(out_dir / "metadata.yaml", 'w', encoding='utf-8') as f:
         yaml.dump(metadata, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-    log.info(f"Wrote result.json + metadata.yaml + assets/ ({res_files_exported} files) to dist/")
+    log.info(f"Wrote result.json + metadata.yaml + assets.json ({res_files_exported} assets) to {out_dir}/")
 
     # ── Generate index.html ──────────────────────────────────────────
     if config.generate_index_html:
@@ -308,8 +343,146 @@ def main_procces(config: Config):
         except Exception as e:
             log.warning(f"Failed to generate index.html: {e}")
 
-    # ── Drop ledger: what this run threw away, and why ──────────────
-    gate.report(log)
+    return metadata
+
+
+def reset_dist() -> None:
+    """Clear generated output without touching hand-managed deploy files."""
+    DIST.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(DIST.iterdir()):
+        if entry.name in DIST_KEEP:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink()
+
+
+def single_package_run(config: Config) -> None:
+    """Legacy single-package mode: walk `package_path` and write to dist/ root."""
+    log = logging.getLogger(__name__)
+    temp = classify(collect_resources(config))
+
+    log.debug(f"configuration: {len(temp.conf_file)} resource: {len(temp.res_file)}")
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    pool = AssetPool(ASSETS_DIR)
+    metadata = parse_package(config, out_dir=DIST, pool=pool, temp=temp,
+                             parse_paths=list(config.package_path))
+    (DIST / "packages.json").write_text(json.dumps({
+        "schema": SCHEMA_VERSION,
+        "packages": [{
+            "id": "default",
+            "label": "default",
+            "layers": [Path(p).name for p in config.package_path],
+            "records": sum(metadata["entity_counts"].values()),
+            "counts": metadata["entity_counts"],
+            "assets": metadata["assets"]["exported"],
+        }],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def multi_package_run(config: Config) -> None:
+    """Every package under `packages.root` becomes its own selectable dataset."""
+    log = logging.getLogger(__name__)
+    assert config.packages is not None
+    root = Path(os.path.expanduser(config.packages.root))
+
+    ids = pkgmod.list_ids(root,
+                          include=config.packages.include,
+                          exclude=config.packages.exclude)
+    log.info("discovered %d packages under %s", len(ids), root)
+
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    pool = AssetPool(ASSETS_DIR)
+
+    index: List[Dict[str, Any]] = []
+    for pid in ids:
+        # Counters are reported per package: one accumulated block for 22
+        # packages cannot be explained, which AGENTS.md §3.4 requires.
+        gate.reset()
+        pkg = pkgmod.build(root, pid,
+                           default_base=config.packages.default_base,
+                           exclude_patterns=config.exclude_patterns)
+        log.info("── package '%s' (%d layers, %d files, %d shadowed)",
+                 pkg.id, len(pkg.layers), len(pkg.files), pkg.shadowed)
+
+        # Mod-first so `inherit_from` prefers the overriding copy; the layer
+        # stack that built the file map is base-first, which is its inverse.
+        parse_paths = [str(p) for p in reversed(pkg.layers)]
+
+        # Derive the effective config: every path-relative operation (inherit
+        # resolution, _source) must see this package's stack, not the config's.
+        pkg_config = config.model_copy(update={"package_path": parse_paths})
+
+        temp = classify(pkg.files.values())
+        out_dir = PACKAGES_DIR / pkg.id
+        metadata = parse_package(pkg_config, out_dir=out_dir, pool=pool,
+                                 temp=temp, parse_paths=parse_paths)
+        gate.report(log, prefix=f"[{pkg.id}]")
+
+        index.append({
+            "id": pkg.id,
+            "label": pkg.id,
+            # A nested override dir carries the same name as the package it
+            # patches, so the raw path list reads `vanilla + vanilla + classic`.
+            # Collapse to the names a person would say out loud.
+            "layers": list(dict.fromkeys(p.name for p in pkg.layers)),
+            "files": len(pkg.files),
+            "shadowed": pkg.shadowed,
+            "records": sum(metadata["entity_counts"].values()),
+            "counts": metadata["entity_counts"],
+            "assets": metadata["assets"]["exported"],
+            "built": metadata["timestamp"],
+        })
+
+    # ── dist/packages.json — the selector's data ──────────────────────
+    with open(DIST / "packages.json", "w", encoding="utf-8") as f:
+        json.dump({"schema": SCHEMA_VERSION, "packages": index}, f,
+                  ensure_ascii=False, indent=2)
+
+    # ── dist/metadata.yaml — build-level summary ──────────────────────
+    metadata = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "schema": SCHEMA_VERSION,
+        "config_file": config.CONFIGFILE,
+        "packages_root": str(root),
+        "package_count": len(index),
+        "entity_counts": {
+            t: sum(p["counts"].get(t, 0) for p in index)
+            for t in sorted({t for p in index for t in p["counts"]})
+        },
+        "assets": {
+            "pool_files": pool.written + pool.reused,
+            "written": pool.written,
+            "deduplicated": pool.reused,
+        },
+    }
+    with open(DIST / "metadata.yaml", 'w', encoding='utf-8') as f:
+        yaml.dump(metadata, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    log.info("package index: %d packages, asset pool %d written / %d deduplicated (%d total)",
+             len(index), pool.written, pool.reused, pool.written + pool.reused)
+
+    # ── dist/index.html — package selector landing page ────────────────
+    if config.generate_index_html:
+        try:
+            from util.index_html import generate_landing
+            generate_landing(DIST, index, metadata)
+            log.info("Wrote package landing page")
+        except Exception as e:
+            log.warning(f"Failed to generate landing index.html: {e}")
+
+
+@timer
+def main_procces(config: Config):
+    logging.getLogger(__name__).info("processing config '%s'", config.CONFIGFILE)
+    reset_dist()
+    if config.packages is not None:
+        # Multi-package mode reports its own counters per package.
+        multi_package_run(config)
+    else:
+        single_package_run(config)
+        gate.report(logger)
 
 
 if __name__ == "__main__":

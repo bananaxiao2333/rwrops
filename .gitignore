@@ -22,3 +22,5 @@ config/*
 logs/
 vanilla/
 assets/
+# Gate baselines (never deployed)
+.gate/

@@ -8,34 +8,69 @@
 ## 1. 数据流与边界
 
 ```
-vanilla/*.xml  ──[rwrops]──▶  dist/  ──[EdgeOne Pages]──▶  rwrops-webhelper
-                               result.json                  (React SPA, 独立仓库)
-                               metadata.yaml
-                               assets/  (内容哈希)
-                               index.html
+media/packages/*  ──[rwrops]──▶  dist/  ──[EdgeOne Pages]──▶  rwrops-webhelper
+                                  packages/<id>/result.json   (React SPA, 独立仓库)
+                                  packages/<id>/metadata.yaml
+                                  packages/<id>/assets.json
+                                  packages.json   (包索引)
+                                  assets/         (全局内容哈希池)
+                                  index.html      (包选择落地页)
 ```
 
 - 本仓库只负责**提取**。渲染在 `../rwrops_webhelper`（`VITE_DATA_SOURCE` 指向 `dist/` 或线上 URL）。
-- 上游是游戏包（默认 `…/media/packages/vanilla`，720 MB / 1,585 个 XML）。
+- 上游是游戏包根目录 `…/media/packages`（2.4 GB / 22 个顶层包 / 约 1,968 个可解析文件）。
+- **每个顶层包一个数据集**，不是一份合并数据。见 §1.1。
 - 线上数据地址即 `dist/` 的部署结果，不是本仓库的代码。
+
+### 1.1 包 = VFS 覆盖层，不是目录
+
+`classic/` 自己有 103 个文件，`ww2_invasion/` 有 28 个——单看目录会以为它们是两个小包。
+实际上它们是**覆盖层**：游戏把 base 包和 mod 一起挂载，顶层定义赢。单独解析一个覆盖层
+得到 100 来条记录，然后管它叫「classic 包的数据」，既没用又误导。
+
+所以每个包的层栈是（`util/packages.py`）：
+
+```
+layers(P) = [ 声明的 base 包, 按名排序 ]
+          + [ P/packages/<dep> 覆盖, 按名排序 ]
+          + [ P 自己的树，排除 P/packages ]
+```
+
+`packages/` 子目录有两种含义，靠**同名顶层包是否存在**区分：
+
+| 形态 | 含义 |
+| --- | --- |
+| `classic/packages/vanilla/`，且顶层有 `vanilla/` | 对该包的**补丁**。键相对 `classic/packages/vanilla/` 计算，因此能覆盖到 base 的键 |
+| `ww2_base/packages/ww2_undead/`，顶层没有 `ww2_undead/` | 该包**自带**的独立子包，像普通层一样贡献文件 |
+
+没有 `packages/` 子目录的包叠在 `default_base`（`vanilla`）上，除非它自己就是 base。
+这对 `pvp` / `teddy_hunt` / `camera_mod` 是对的，对 WW2 的几个组件包无害（它们只会通过
+`ww2_base` 被使用）。
+
+合并规则是**按包内相对路径去重，后一层赢**，丢弃数记在 `[gate] layer_overridden`。
+`parse_paths` 传给解析器时是**反序**的（mod 在前），这样 `inherit_from` 优先取覆盖版本。
 
 ---
 
 ## 2. 门禁：每次改动必须过
 
 ```bash
-./gate.sh                    # 与上一次输出对比（自动保存 dist/result.prev.json）
-./gate.sh /path/golden.json  # 与指定基线对比
+./gate.sh                    # 与 .gate/ 里每个包的基线对比（通过后自动刷新基线）
+./gate.sh /path/to/basedir   # 与 <basedir>/<包名>.json 对比
 ```
 
 四关，任一失败即停止排查：
 
 | 关 | 检查 | 失败意味着 |
 | --- | --- | --- |
-| 1 | `main.py` 退出码 + `result.json` sha256 | 管线挂了 |
-| 2 | **连跑两次，字节必须相同** | 非确定性：`os.walk` 顺序、`rglob` 首个命中、`clean_final` 先到先得 |
-| 3 | `[gate]` 丢弃计数 | 有东西被丢掉，且必须能解释 |
-| 4 | `util/diff.py` 与基线对比 | **`DISAPPEARED` 非空 = 数据丢了，exit 1** |
+| 1 | `main.py` 退出码 + 各包 `result.json` 的合并 sha256 | 管线挂了 |
+| 2 | **连跑两次，全部包字节必须相同** | 非确定性：`os.walk` 顺序、层序遍历、`find_file_in_package_paths` 平局 |
+| 3 | `[gate]` 丢弃计数（**按包分别报**） | 有东西被丢掉，且必须能解释 |
+| 4 | `util/diff.py` 逐包与基线对比 | **`DISAPPEARED` 非空 = 数据丢了，exit 1** |
+
+基线在仓库根的 `.gate/<包名>.json`，不在 `dist/` 里：`dist/` 下的东西全都会上传到 CDN。
+`main.py` 每次运行会清空 `dist/`（保留 `.edgeone` / `edgeone.json` / `.env` / `.gitignore` / `.cursor`），
+所以基线不能放那儿。
 
 **硬性要求**
 
@@ -43,6 +78,7 @@ vanilla/*.xml  ──[rwrops]──▶  dist/  ──[EdgeOne Pages]──▶  r
 2. 第 2 关失败**优先修确定性**，不要去调基线。输出不稳定时 diff 没有意义。
 3. 第 4 关报 `DATA LOST` 时，**默认当作真丢数据**。确认是「去重/去污染」这类刻意行为，才能在提交信息里说明并接受。
 4. 换机器 / 换文件系统 / 加删文件之后，先跑一次门禁再信任何 diff。
+5. 禁止手改 `dist/`——它是生成物，下次运行会覆盖。
 
 ---
 
@@ -104,13 +140,33 @@ print(cfg.entities['vehicle'].children['turrets'].deep)   # 期望 False
 
 ### 3.4 计数器必须能解释
 
-`gate.sh` 第 3 关的每一项非零都要能说出原因。当前基线（属正常）：
+`gate.sh` 第 3 关的每一项非零都要能说出原因。计数器**按包分别报告**（`[gate][vanilla] …`）——
+22 个包累计成一块没法解释。`vanilla` 包（= 单包模式的等价物）的基线：
 
 ```
-[gate] inherit_scoped:        340    按作用域规则解决，不是盲猜
-[gate] inherit_ambiguous:       1    真平局（wiesel_spawn.vehicle 同 key 双定义）
-[gate] child_dropped_empty:    87    元素不含任何被配置提取的属性（已逐条查清）
-[gate] parse_error:             0    必须为 0，非 0 立刻查
+[gate][vanilla] inherit_scoped:        340    按作用域规则解决，不是盲猜
+[gate][vanilla] inherit_ambiguous:       1    真平局（wiesel_spawn.vehicle 同 key 双定义）
+[gate][vanilla] child_dropped_empty:    87    元素不含任何被配置提取的属性（已逐条查清）
+[gate][vanilla] entity_empty:            1
+[gate][vanilla] parse_error:             0    必须为 0，非 0 立刻查
+[gate][vanilla] derive_missing:          4    派生字段指向的文件不存在 → 写 null，**不是丢字段**
+                                              （lobby 无 mapview_frame；lobby/map17/map20 无 mask）
+[gate][vanilla] derive_extra_match:      7    一个 glob 匹配到多张 mask，只取第一个
+                                              （map8/14/15/18/19/1_2/21 各有多张）
+```
+
+> **`derive_fields` 的值是包内相对路径，不是拍平名。** 它同时是 `assets.json` 的键空间，
+> 前端就是拿这个值去索引里查图片的。历史上这里做 `.replace("/", "_")`，只有当文件**存在**时
+> 才被 `main.py` 的 `rel_path_map` 兜回路径；文件不存在（3 张图无 mask）时拍平名直接漏进输出，
+> 前端 404。现在：pattern 走 glob（mask 是 `{key}_mask*.png`），只接受真实存在的文件，
+> 匹配不到写 `null` —— 字段集保持统一，`util/diff.py` 也能区分「显式空」和「解析器退化」。
+
+覆盖层包另有三个理由：
+
+```
+layer_overridden       后一层覆盖了前一层的同路径文件——这是覆盖语义，不是丢数据
+layer_bundled_package  包自带了一个顶层不存在的子包（ww2_base/packages/ww2_undead）
+layer_base_missing     default_base 不在 packages 根下（不该出现，出现就是配置错了）
 ```
 
 新增丢弃点时，**必须同时在 `util/gate.py` 里 `bump` 一个理由**。禁止静默 `continue` / `except: pass`。
@@ -120,6 +176,7 @@ print(cfg.entities['vehicle'].children['turrets'].deep)   # 期望 False
 - [ ] `./gate.sh` → `GATE PASS`，且输出贴进提交信息
 - [ ] 第 4 关 `DISAPPEARED` 为空，或有明确且已验证的解释
 - [ ] 第 3 关计数器全部能解释
+- [ ] 多包改动 → 确认 `vanilla` 包的输出**逐字节**等于改动前（它是单包语义的对照组）
 - [ ] 装配了 `config/core.yaml` 的改动 → 跑 `util.coverage_check` 看覆盖有没有倒退
 - [ ] 涉及匹配语义 → 已做 §3.3 的小样本对比
 - [ ] 行为类改动 → 已按 §3.2 证明生效
@@ -164,7 +221,7 @@ CLI 已安装：`edgeone`（v1.6.13，`edgeone whoami` 应显示 `banana.xiao@qq
 | 站点 | 部署目录 | 项目名 | 项目 ID | 线上地址 |
 | --- | --- | --- | --- | --- |
 | **数据** | `RWR/rwrops/dist` | `rwrops` | `makers-yfee59lv76jg` | `https://rwr-static.079682.xyz`（自定义域名） |
-| **前端** | `RWR/rwrops_webhelper/dist` | `rwropswh` | `pages-fj64cuxx2y1z` | `https://rwropswh.edgeone.dev` |
+| **前端** | `RWR/rwrops_webhelper/dist` | `rwropswh` | `pages-fj64cuxx2y1z` | `https://rwrops.b.rwr-infra.uk`（自定义域名；`rwropswh.edgeone.dev` 401） |
 
 两个项目都已有 `.edgeone/project.json` 记录绑定。
 
@@ -212,17 +269,42 @@ npm run build && edgeone makers deploy dist
   "caches":  [{ "source": "/assets/*", "cacheTtl": 604800 }] }
 ```
 
-- **CORS `*` 是必须的** —— webhelper 在另一个域名跨域拉 `result.json` / `assets/`。
+- **CORS `*` 是必须的** —— webhelper 在另一个域名跨包拉 `result.json` / `assets/`。
   删掉它前端会直接白屏，且本地开发察觉不到。
 - **`/assets/*` 缓存 7 天是安全的**，因为文件名带内容哈希（`xxx-<sha256[:8]>.png`）。
-- **`result.json` 刻意不缓存**，所以数据更新后立刻生效，不需要刷 CDN。
+- **数据文件刻意不缓存**，所以数据更新后立刻生效，不需要刷 CDN。
 
-### 5.4 部署顺序
+### 5.4 部署体积
 
-数据先、前端后。前端会把 `result.json` 的字段路径写进用户配置（MetaGen），
+站点是整体上传，所以 `dist/` 的**每个字节都会上传**：
+
+| 部分 | 量级 | 说明 |
+| --- | --- | --- |
+| `assets/` | ~620 MB / 1,874 文件 | 全局内容哈希池。22 个包共 21,900 次引用去重到 1,874 个文件 |
+| ├ 其中地图 `objects.svg` | ~276 MB / 49 文件 | 每张地图的对象布局覆盖层，`map_config.objects_svg` 指向它。最大的 12.1 MB（< 25 MB 单文件上限）。SVG 是文本，边缘压缩后约为原体积 1/3 |
+| `packages/*/result.json` | ~90 MB | 每包 4–5 MB |
+| `packages/*/index.html` | ~66 MB | 每包约 3 MB，内联了该包全部表格 |
+| `packages.json` + `metadata.yaml` + 落地页 | < 100 KB | 包选择器的数据 |
+
+整站约 **881 MB**（EdgeOne 免费版：单文件 25 MB / 单项目 20,000 文件 / 站点总容量 5 GB，均在限内）。
+`objects.svg` 占了大头——它原先被 `classify()` 当配置文件跳过，导致每张地图的 objects 层都是坏图。
+若要砍体积，先量再砍，别默默跳过。
+
+`generate_index_html: false` 可以砍掉那 66 MB——线上真正用的是 webhelper 前端，
+`index.html` 只是离线可读的兜底。改部署体积前先量。
+
+### 5.5 部署顺序
+
+**增量变更**：数据先、前端后。前端会把 `result.json` 的字段路径写进用户配置（MetaGen），
 先发前端而数据还是旧的，用户会拿到指向不存在字段的配置。
 
-### 5.5 回退（部署前必须先做）
+**破坏性变更**（如这次把根 `result.json` 换成 `packages/<id>/result.json`）：**前端先、数据后**。
+旧前端读新数据会直接崩。两端都装了垫片，所以顺序任意、可各自独立回退：
+
+- 前端 `dataSource.js`：拿不到 `packages.json` 就退回旧的单数据集路径（打 warning）。
+- bot `loader.py`：认旧的裸 `result.json` 形状（打 warning）。
+
+### 5.6 回退（部署前必须先做）
 
 EdgeOne Makers 是**整体覆盖上传，没有版本历史**，CLI 也没有回退子命令（只有 init/dev/link/deploy）。
 所以**回退的唯一凭据是部署前自己留的副本**。
@@ -248,20 +330,16 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone makers deploy d
 
 前端不需要镜像——它的源码在 git 里，回退就是 checkout 旧提交后重建。
 
-**部署顺序：破坏性变更要「前端先、数据后」。**
+### 5.7 域名现状
 
-`AGENTS.md` §5.4 说数据先，那是对**增量**变更而言（前端会把字段路径写进用户配置）。
-但对**破坏性**变更（如 result.json 换形状），旧前端读新数据会直接崩，所以反过来。
+前端可公开访问的域名是 **`https://rwrops.b.rwr-infra.uk`**（EdgeOne 自定义域名，指向
+`rwropswh` 项目，实测 200）。另外两个都不是它：
 
-前提是两端都装了**过渡垫片**：新前端/新 bot 同时认旧形状（打 warning），
-这样顺序任意、数据与前端可各自独立回退。垫片在 schema 2 稳定一段时间后删掉。
+- `rwrops.079682.xyz` —— **死的**（NXDOMAIN），README 里写的那个
+- `rwropswh.edgeone.dev` —— EdgeOne 默认域名，返回 **401**（站点访问鉴权开着），`eo_token` 也进不去
 
-### 5.6 域名现状
-
-前端 README 里写的 `rwrops.079682.xyz` **是死的**（连 8.8.8.8 都 NXDOMAIN），
-真正能访问的是 EdgeOne 默认域名 `rwropswh.edgeone.dev`，见 §5.1。
-
-绑自定义域名时记得同步 `rwrops_webhelper/README.md` 和 `scripts/generate-sitemap.js`。
+改域名时记得同步 `rwrops_webhelper/README.md` 和 `scripts/generate-sitemap.js`
+（后者目前仍写着 `rwrops.079682.xyz`）。
 
 ---
 
@@ -286,6 +364,11 @@ cd RWR/rwrops_webhelper && git stash && npm run build && edgeone makers deploy d
    git check-ignore -v config/foo.yaml    # 输出 .gitignore:17 = 会被忽略
    ```
 8. Python ≥ 3.14，依赖用 `uv`（`lxml` 已在依赖里，需要更快解析时直接可用）。
+9. **路径相对化必须取「最深根」，不能取首次匹配。** `parse_paths` 是 mod-first，包的自身目录
+   排在它的 `packages/<dep>` 覆盖挂载**之前**，所以裸 `relative_to()` 会先命中外层目录，把覆盖
+   文件键成 `packages/vanilla/maps/map11/map.png` —— 没有任何记录引用这个键，文件随后被 `refs`
+   过滤掉，整张图**静默消失**（`classic` 的 10 张 `map.png` 就这么丢的，前端表现为地图缩略图空）。
+   一律用 `util/ops.relative_to_roots()`：它返回最短相对路径，也就是文件真正所在的那个根。
 
 ---
 
