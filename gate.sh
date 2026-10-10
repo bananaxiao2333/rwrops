@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # rwrops acceptance gate. Run after every change.
 #
-#   ./gate.sh                  # compare against the previous run (auto-saved)
-#   ./gate.sh /tmp/golden.json # compare against a specific baseline
+#   ./gate.sh                  # compare against the saved baselines in .gate/
+#   ./gate.sh /path/to/basedir # compare against <basedir>/<package>.json
 #
 # Four checks, not a test framework. If one fails, stop and look.
 #
-# dist/result.prev.json is written at the start of every run, so the next
-# ./gate.sh automatically tells you how this run differs from the last one.
+# Every package under dist/packages/ gets a baseline in .gate/<package>.json,
+# refreshed after a passing run, so the next ./gate.sh tells you how each
+# package changed. Baselines live at the repo root rather than under dist/,
+# because everything under dist/ is uploaded to the CDN.
 set -uo pipefail
 cd "$(dirname "$0")"
 
-BASELINE="${1:-dist/result.prev.json}"
+BASEDIR="${1:-.gate}"
 FAIL=0
 
 run() { uv run python main.py >"$1" 2>&1; }
 
-# Snapshot the previous output before overwriting it.
-[ -f dist/result.json ] && cp dist/result.json dist/result.prev.json
+# sha256 + path for every package result.json, in a fixed order. This is the
+# whole-output fingerprint; LC_ALL=C sort makes the order a property of the
+# path list, not of the locale.
+manifest() {
+  find dist/packages -name result.json 2>/dev/null | LC_ALL=C sort | while read -r f; do
+    printf "%s  %s\n" "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"
+  done
+}
+digest() { manifest | shasum -a 256 | cut -d' ' -f1; }
 
 echo "── gate 1/4: pipeline ──────────────────────────────"
 if ! run /tmp/gate_a.log; then
@@ -25,18 +34,21 @@ if ! run /tmp/gate_a.log; then
   tail -30 /tmp/gate_a.log
   exit 1
 fi
-grep -E "Wrote result.json|Traceback|CRITICAL" /tmp/gate_a.log | tail -5
-A=$(shasum -a 256 dist/result.json | cut -d' ' -f1)
-echo "result.json sha256 ${A:0:16}…"
+grep -E "Wrote result.json|Traceback|CRITICAL" /tmp/gate_a.log | tail -3
+A=$(digest)
+NPKG=$(manifest | wc -l | tr -d ' ')
+echo "result.json sha256 ${A:0:16}…  (${NPKG} packages)"
 
 echo "── gate 2/4: determinism (rerun, same bytes?) ──────"
+BEFORE=$(manifest)
 run /tmp/gate_b.log
-B=$(shasum -a 256 dist/result.json | cut -d' ' -f1)
-if [ "$A" = "$B" ]; then
+AFTER=$(manifest)
+if [ "$BEFORE" = "$AFTER" ]; then
   echo "OK: two runs produced identical output"
 else
-  echo "FAIL: non-deterministic — ${A:0:16}… != ${B:0:16}…"
-  echo "      (os.walk order / rglob first-hit / clean_final keep-existing)"
+  echo "FAIL: non-deterministic — these packages differ between runs:"
+  diff <(echo "$BEFORE") <(echo "$AFTER") | head -20
+  echo "      (os.walk order / find_file_in_package_paths ties / layer order)"
   FAIL=1
 fi
 
@@ -47,13 +59,37 @@ else
   echo "  (none — nothing was dropped, or instrumentation is missing)"
 fi
 
-echo "── gate 4/4: diff vs baseline ──────────────────────"
-if [ -f "$BASELINE" ]; then
-  uv run python -m util.diff "$BASELINE" dist/result.json
+echo "── gate 4/4: diff vs baselines in ${BASEDIR}/ ──────"
+shopt -s nullglob
+LOST=0
+for f in dist/packages/*/result.json; do
+  pkg=$(basename "$(dirname "$f")")
+  base="${BASEDIR}/${pkg}.json"
+  if [ ! -f "$base" ]; then
+    echo "  [${pkg}] no baseline yet — this run becomes it"
+    continue
+  fi
+  out=$(uv run python -m util.diff "$base" "$f")
   rc=$?
-  [ $rc -eq 1 ] && { echo "FAIL: data was lost vs $BASELINE"; FAIL=1; }
-else
-  echo "  no baseline at $BASELINE — this run becomes the baseline"
+  if [ $rc -ne 0 ]; then
+    LOST=$((LOST + 1))
+    echo "  [${pkg}] DATA LOST vs ${base}"
+    echo "$out" | sed 's/^/    /'
+  elif echo "$out" | grep -qE "CHANGED|APPEARED"; then
+    echo "  [${pkg}] changed (no loss)"
+  fi
+done
+[ $LOST -gt 0 ] && { echo "FAIL: data was lost in ${LOST} package(s)"; FAIL=1; }
+
+if [ $FAIL -eq 0 ]; then
+  mkdir -p "$BASEDIR"
+  n=0
+  for f in dist/packages/*/result.json; do
+    pkg=$(basename "$(dirname "$f")")
+    cp "$f" "${BASEDIR}/${pkg}.json"
+    n=$((n + 1))
+  done
+  echo "  baselines refreshed (${n})"
 fi
 
 echo

@@ -1,3 +1,16 @@
+# ── Multi-package mode ────────────────────────────────────────────────
+# Every top-level directory under `root` becomes its own selectable dataset,
+# layered on its declared dependencies (or on `default_base`) so an overlay like
+# `classic` yields the data the game actually loads, not just the 103 files it
+# ships. See util/packages.py. Leave `packages` out to fall back to the single
+# `package_path` mode below.
+packages:
+  root: "/Users/bananaxiao/Library/Application Support/Steam/steamapps/common/RunningWithRifles/RunningWithRifles.app/Contents/Resources/media/packages"
+  # include: ["vanilla", "classic"]   # empty = every package under root
+  # exclude: ["ww2_base"]             # packages to skip
+  default_base: "vanilla"             # base for packages that declare no deps
+
+# Single-package mode (ignored while `packages` is set)
 package_path:
   - "/Users/bananaxiao/Library/Application\ Support/Steam/steamapps/common/RunningWithRifles/RunningWithRifles.app/Contents/Resources/media/packages/vanilla"
   # - "C:\\Program Files (x86)\\Steam\\steamapps\\common\\RunningWithRifles\\media\\packages\\vanilla"
@@ -1508,7 +1521,11 @@ entities:
       - target: "heightmap"
         pattern: "maps/{key}/terrain5_heightmap.png"
       - target: "mask_image"
-        pattern: "maps/{key}/{key}_mask.png"
+        # Masks are numbered on most maps: map13_mask1.png, map19_mask1..3.png,
+        # map15_mask.png + map15_mask1/2.png. Only 8 of 19 maps have the bare
+        # `{key}_mask.png` form, so a non-glob pattern left 11 maps pointing at
+        # a file that has never existed. Take the first match in layer order.
+        pattern: "maps/{key}/{key}_mask*.png"
       - target: "objects_svg"
         pattern: "maps/{key}/objects.svg"
 

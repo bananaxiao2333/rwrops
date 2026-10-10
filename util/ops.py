@@ -1,3 +1,4 @@
+import glob
 import re
 from bs4 import BeautifulSoup, Tag
 import os
@@ -8,6 +9,27 @@ from .classes import Config, Temp, TransformType, EntityConfig
 from . import gate
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_derived_paths(pattern: str, roots: List[str]) -> List[str]:
+    """Every layer-relative POSIX path matching `pattern`, in layer order.
+
+    `pattern` is package-relative and may carry glob metacharacters. `roots` is
+    mod-first, so an override beats the base package — the same order main.py
+    uses to build the `assets.json` keys, which is the key space the frontend
+    looks values up in. Duplicates across layers keep the first (mod) hit.
+    """
+    found: List[str] = []
+    for root in roots:
+        root_path = Path(root)
+        for hit in sorted(glob.glob(str(root_path / pattern))):
+            try:
+                rel = Path(hit).relative_to(root_path).as_posix()
+            except ValueError:
+                continue
+            if rel not in found:
+                found.append(rel)
+    return found
 
 
 def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: Optional[str] = None) -> Temp:
@@ -92,14 +114,43 @@ def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: 
                     # logger.warning(f"Entity missing required attributes {missing_attrs}, skipping: {entity_data.get('key', 'unknown')}")
                     continue
 
-                # Apply derive_fields: pattern-based field generation
+                # Apply derive_fields: pattern-based field generation.
+                #
+                # The value must be a package-relative *path*, because that is
+                # the key space of `assets.json` and the frontend resolves an
+                # image by looking its value up there. Flattening it to
+                # `maps_map1_map.png` (the old behaviour) only ever worked by
+                # accident: main.py's rel_path_map happens to alias the flat
+                # name, but *only for files that exist*. Anything absent — three
+                # maps ship no mask — leaked the flat name straight into the
+                # output and 404'd in the browser.
+                #
+                # The pattern may also be a glob: masks are numbered
+                # (`map13_mask1.png`, `map19_mask3.png`). A pattern that matches
+                # nothing is counted, never emitted.
                 if entity_config_obj.derive_fields:
                     for df in entity_config_obj.derive_fields:
                         try:
                             resolved = df.pattern.format(**entity_data)
-                            entity_data[df.target] = resolved.replace("\\", "_").replace("/", "_")
                         except KeyError:
-                            pass  # skip if template vars missing
+                            continue  # skip if template vars missing
+                        hits = resolve_derived_paths(resolved, config.package_path)
+                        if not hits:
+                            # Declared but absent: three maps ship no mask at
+                            # all, lobby no mapview_frame. Emit an explicit null
+                            # rather than dropping the key — the field set stays
+                            # uniform for consumers, and a vanished key would be
+                            # indistinguishable from a parser regression.
+                            gate.bump("derive_missing")
+                            entity_data[df.target] = None
+                            continue
+                        entity_data[df.target] = hits[0]
+                        if len(hits) > 1:
+                            # e.g. map19 ships mask1/2/3, map15 mask/1/2. The
+                            # field is a single string, so only the primary is
+                            # addressable; count the rest rather than drop them
+                            # silently.
+                            gate.bump("derive_extra_match")
 
                 # Identity. Two files can define the same key -- wiesel_spawn.vehicle
                 # exists in both vehicles/ and weapons/ with a different name -- so
@@ -126,6 +177,27 @@ def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: 
     return temp
 
 
+def relative_to_roots(path: Path, roots: List[str]) -> Optional[str]:
+    """Package-relative POSIX path, resolved against the **deepest** root.
+
+    `roots` is mod-first, so a package's own directory precedes its
+    `packages/<dep>` override mounts. A plain first-match `relative_to` hits the
+    outer directory first and keys an override file as
+    `packages/vanilla/maps/map11/map.png` — a key nothing references, so the
+    file is dropped and the map icon it belongs to 404s. Shortest relative path
+    means deepest root, which is the one the file actually lives in.
+    """
+    best: Optional[Path] = None
+    for root in roots:
+        try:
+            candidate = path.relative_to(Path(root))
+        except ValueError:
+            continue
+        if best is None or len(candidate.parts) < len(best.parts):
+            best = candidate
+    return best.as_posix() if best is not None else None
+
+
 def rel_source(source_path: Optional[str], package_paths: List[str]) -> Optional[str]:
     """Package-relative source path.
 
@@ -134,13 +206,9 @@ def rel_source(source_path: Optional[str], package_paths: List[str]) -> Optional
     """
     if not source_path:
         return None
-    p = Path(source_path)
-    for pp in package_paths:
-        try:
-            return p.relative_to(Path(pp)).as_posix()
-        except ValueError:
-            continue
-    return p.name
+    # Falls back to the bare name only when the file sits under no root at all
+    # (the old behaviour) — a path that is at least not absolute.
+    return relative_to_roots(Path(source_path), package_paths) or Path(source_path).name
 
 
 def apply_uniqueness_constraints(entity_data: Dict[str, Any], entity_config: EntityConfig, entity_name: str, unique_values: Dict[Tuple[str, str], Set[Any]], logger: logging.Logger) -> Optional[Dict[str, Any]]:

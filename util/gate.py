@@ -17,12 +17,23 @@ def bump(reason: str, n: int = 1) -> None:
     COUNTERS[reason] += n
 
 
-def report(log) -> None:
+def reset() -> None:
+    """Clear the counters.
+
+    Multi-package runs report per package: one accumulated `[gate]` block for 22
+    packages is unreadable, and AGENTS.md §3.4 requires every non-zero counter to
+    be explainable.
+    """
+    COUNTERS.clear()
+
+
+def report(log, prefix: str = "") -> None:
+    tag = f"[gate]{prefix} " if prefix else "[gate] "
     if not COUNTERS:
-        log.info("[gate] no drops recorded")
+        log.info("%sno drops recorded", tag)
         return
     for reason in ALWAYS_REPORT:
-        log.info("[gate] %s: %d", reason, COUNTERS.get(reason, 0))
+        log.info("%s%s: %d", tag, reason, COUNTERS.get(reason, 0))
     for reason, n in sorted(COUNTERS.items()):
         if reason not in ALWAYS_REPORT:
-            log.info("[gate] %s: %d", reason, n)
+            log.info("%s%s: %d", tag, reason, n)

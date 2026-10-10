@@ -98,11 +98,31 @@ class SortConfig(BaseModel):
     primarykey: str = 'key'
 
 
+class PackagesConfig(BaseModel):
+    """Multi-package mode: every package under `root` becomes its own dataset.
+
+    `root` is the game's `media/packages` directory. Each top-level directory in
+    it is one selectable package, layered on its declared dependencies (or on
+    `default_base`) so overlays produce the data the game actually loads rather
+    than just the few files they ship. See util/packages.py.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    root: str
+    include: List[str] = Field(default_factory=list)
+    exclude: List[str] = Field(default_factory=list)
+    default_base: str = "vanilla"
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     CONFIGFILE: str
-    package_path: List[str]
+    #: Single-package mode. Ignored when `packages` is set.
+    package_path: List[str] = Field(default_factory=list)
+    #: Multi-package mode. When set, the effective package_path is derived per package.
+    packages: Optional[PackagesConfig] = None
     output_format: str
     pretty_print: bool
     include_source: bool
@@ -147,7 +167,18 @@ class Config(BaseModel):
         if 'sort' in data and isinstance(data['sort'], dict):
             data['sort'] = SortConfig(**data['sort'])
 
+        if 'packages' in data and isinstance(data['packages'], dict):
+            data['packages'] = PackagesConfig(**data['packages'])
+
         return data
+
+    @model_validator(mode='after')
+    def require_a_source(self) -> 'Config':
+        if not self.package_path and self.packages is None:
+            raise RuntimeError(
+                "config declares neither `package_path` nor `packages.root` — "
+                "nothing to parse")
+        return self
 
     @field_validator('package_path')
     @classmethod
