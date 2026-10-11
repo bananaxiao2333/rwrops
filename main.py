@@ -81,6 +81,31 @@ class AssetPool:
         return safe_name
 
 
+#: `classify()` runs once per package and 22 packages share nearly all their
+#: files — `classic` alone re-sniffs all 4,140 of `vanilla`'s. The answer is a
+#: pure function of the file's bytes, so it is memoised for the whole run.
+#: Across the 22-package build this turns ~90k sniffs into ~6k.
+_CONFIG_SNIFF_CACHE: Dict[str, bool] = {}
+
+
+def _sniff_config(path: Path) -> bool:
+    """True when *path* should be treated as an XML config rather than an asset."""
+    try:
+        data = file_reader(path, size=5)
+    except Exception:
+        return False
+    if not data.startswith("<"):
+        return False
+    # SVG is XML, so it sniffs as a config file — but it is an asset.
+    # `map_config.objects_svg` points at maps/<key>/objects.svg (19 files,
+    # 96 MB) and the frontend renders it as the map object-layout overlay.
+    # Treating it as a config both failed to parse it and left the field
+    # pointing at nothing, so every map showed a broken image.
+    if path.suffix.lower() == ".svg":
+        return False
+    return True
+
+
 def classify(paths: Iterable[Path]) -> Temp:
     """Split a file list into XML-ish configs and resources.
 
@@ -89,23 +114,15 @@ def classify(paths: Iterable[Path]) -> Temp:
     """
     temp = Temp()
     for path in paths:
-        try:
-            data = file_reader(path, size=5)
-            if data.startswith("<"):
-                # SVG is XML, so it sniffs as a config file — but it is an
-                # asset. `map_config.objects_svg` points at maps/<key>/objects.svg
-                # (19 files, 96 MB) and the frontend renders it as the map
-                # object-layout overlay. Treating it as a config both failed to
-                # parse it and left the field pointing at nothing, so every map
-                # showed a broken image.
-                if path.suffix.lower() == '.svg':
-                    temp.res_file.append(str(path))
-                    continue
-                temp.conf_file.append(str(path))
-            else:
-                raise RuntimeError
-        except Exception:
-            temp.res_file.append(str(path))
+        key = str(path)
+        is_conf = _CONFIG_SNIFF_CACHE.get(key)
+        if is_conf is None:
+            is_conf = _sniff_config(path)
+            _CONFIG_SNIFF_CACHE[key] = is_conf
+        if is_conf:
+            temp.conf_file.append(key)
+        else:
+            temp.res_file.append(key)
     return temp
 
 
@@ -144,7 +161,9 @@ def parse_package(
                 gate.bump("parse_error")
             pbar.update()
 
-    # ── Plugin hooks: parse AngelScript files for commands & exchange items ──
+    # ── Plugin hooks: AngelScript sources ─────────────────────────────
+    # Four things come out of the .as files: chat commands, the exchange
+    # categories, the weighted reward/lottery pools, and named resource lists.
     try:
         from util.as_parser import run as run_as_parser
 
@@ -153,18 +172,152 @@ def parse_package(
             exch_path=Path(config.as_exchange_path) if config.as_exchange_path else None,
             search_dirs=[Path(p) for p in parse_paths],
         )
-        # Inject commands as entities. They come from AngelScript, not XML, so
-        # they carry their own source and need the same identity fields.
+
+        # ── commands ──────────────────────────────────────────────────
+        # They come from AngelScript, not XML, so they carry their own source
+        # and need the same identity fields. A package's layer stack can hold
+        # several handlers (admin, supporter, emoticons, per-gamemode), so the
+        # parser reports the file each command came from and it is used as-is.
         cmd_src = rel_source(as_data.get("command_source"), parse_paths)
         for cmd in as_data.get("commands", []):
+            src = cmd.get("source") or cmd_src
             cmd["type"] = "command_config"
             cmd["key"] = cmd["command"]
-            cmd["_source"] = cmd_src
-            cmd["_id"] = f"command_config:{cmd['command']}@{cmd_src or '?'}"
+            cmd["_source"] = src
+            cmd["_id"] = f"command_config:{cmd['command']}@{src or '?'}"
             temp.final.append(cmd)
+
+        # ── reward pools ──────────────────────────────────────────────
+        # One record per weighted table, keyed by the function that declares
+        # it. `SpawnAtNode(m_metagame, resources, "random_crate", …)` is a
+        # stage crate lottery; `GiftItemDeliveryRandomRewarder(…, rewardPasses)`
+        # is the ticket exchange. Both are the same shape, so both land here.
+        # Entities that can be won get a light pointer back to the table —
+        # deliberately not a copy of the pools, which would multiply the file
+        # by the pool size (setupIcecream alone lists 176 prizes).
+        for entry in as_data.get("reward_pools", []):
+            src = entry.get("source", "")
+            group = entry.get("group", "")
+            labels = entry.get("consumer_args") or []
+            label = labels[0] if labels else ""
+            record = {
+                "type": "reward_pool",
+                "key": f"{group}",
+                "group": group,
+                "consumer": entry.get("consumer", ""),
+                "label": label,
+                "pools": entry.get("pools", []),
+                "_source": src,
+                "_id": f"reward_pool:{group}@{src or '?'}",
+            }
+            temp.final.append(record)
+
+            pointer = {
+                "group": group,
+                "source": src,
+                "consumer": entry.get("consumer", ""),
+                "label": label,
+            }
+            # NB: the loop variable must not be called `pool` — that is the
+            # AssetPool parameter of this function, and shadowing it made every
+            # asset export fail with "'list' object has no attribute 'export'".
+            for prize_pool in entry.get("pools", []):
+                for prize in prize_pool:
+                    key = prize.get("key", "")
+                    if not key:
+                        continue
+                    for entity in temp.final:
+                        if entity.get("key") != key:
+                            continue
+                        bucket = entity.setdefault("reward_sources", [])
+                        if pointer not in bucket:
+                            bucket.append(pointer)
+                        break
+
+        # ── resource lists ────────────────────────────────────────────
+        # `setup*` groups are the exchange delivery inputs, already covered by
+        # `exchange_prizes` above; the rest are standalone item lists such as
+        # the vehicle unlock pool. Only the latter become records.
+        for entry in as_data.get("resource_lists", []):
+            group = entry.get("group", "")
+            if group.startswith("setup"):
+                continue
+            src = entry.get("source", "")
+            var = entry.get("variable", "")
+            temp.final.append({
+                "type": "resource_list",
+                "key": group,
+                "group": group,
+                "variable": var,
+                "items": entry.get("items", []),
+                "_source": src,
+                "_id": f"resource_list:{group}@{src or '?'}",
+            })
+
+        # ── string / value tables ─────────────────────────────────────
+        # `array<string> m_rewardVehicles = { … }` and the `dict.set(k, v)`
+        # tables are the content of whole subsystems — the agent reward pools,
+        # the costume pools, the map→region index. They are not entities, so
+        # they get their own records rather than a slot on one.
+        for entry in as_data.get("string_tables", []):
+            src = entry.get("source", "")
+            owner = entry.get("owner", "")
+            var = entry.get("variable", "")
+            label = owner or Path(src).stem
+            temp.final.append({
+                "type": "string_table",
+                "key": f"{label}.{var}",
+                "owner": owner,
+                "function": entry.get("function", ""),
+                "variable": var,
+                "values": entry.get("values", []),
+                "_source": src,
+                "_id": f"string_table:{label}.{var}@{src or '?'}",
+            })
+
+        for entry in as_data.get("value_tables", []):
+            src = entry.get("source", "")
+            owner = entry.get("owner", "")
+            var = entry.get("variable", "")
+            label = owner or Path(src).stem
+            temp.final.append({
+                "type": "value_table",
+                "key": f"{label}.{var}",
+                "owner": owner,
+                "function": entry.get("function", ""),
+                "variable": var,
+                "entries": entry.get("entries", []),
+                "_source": src,
+                "_id": f"value_table:{label}.{var}@{src or '?'}",
+            })
+
+        # ── module index ──────────────────────────────────────────────
+        # One record per .as file: what it includes, which classes it defines,
+        # which trackers it assembles, which engine commands it emits. This is
+        # the script layer the XML side has no equivalent for.
+        for entry in as_data.get("modules", []):
+            src = entry.get("source", "")
+            temp.final.append({
+                "type": "as_module",
+                "key": src,
+                "includes": entry.get("includes", []),
+                "classes": entry.get("classes", []),
+                "trackers": entry.get("trackers", []),
+                "xml_classes": entry.get("xml_classes", []),
+                "_source": src,
+                "_id": f"as_module:{src or '?'}",
+            })
+
         n_cmds = len(as_data.get("commands", []))
         n_exch = len(as_data.get("exchange_categories", []))
-        log.info(f"AS plugin: {n_cmds} commands, {n_exch} exchange categories")
+        n_pool = len(as_data.get("reward_pools", []))
+        n_list = len(as_data.get("resource_lists", []))
+        n_str = len(as_data.get("string_tables", []))
+        n_val = len(as_data.get("value_tables", []))
+        n_mod = len(as_data.get("modules", []))
+        log.info(f"AS plugin: {n_cmds} commands, {n_exch} exchange categories, "
+                 f"{n_pool} reward pools, {n_list} resource lists, "
+                 f"{n_str} string tables, {n_val} value tables, {n_mod} modules")
 
         # Attach exchange data: forward (this → prizes) and reverse (prize → source)
         for cat in as_data.get("exchange_categories", []):

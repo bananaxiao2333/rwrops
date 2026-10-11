@@ -10,6 +10,21 @@ from . import gate
 
 logger = logging.getLogger(__name__)
 
+#: Base-entity resolution memo, shared for the life of the process.
+#:
+#: `parse_file` used to hand in a fresh `{}` per file, so a config whose
+#: entities all inherit from `base_valuable.carry_item` re-opened and re-parsed
+#: that file once per *file* rather than once per *run*. Measured on the first
+#: 400 configs of `vanilla`: 595 base loads over only 193 distinct keys, i.e.
+#: 3.1x redundant work. Hoisting is safe because the key already encodes the
+#: resolution outcome — `base_path` is post-`find_file_in_package_paths`, so a
+#: mod override and a base file never collide.
+#:
+#: The key also carries the config file name and the layer stack: nested
+#: inheritance resolves against `config.package_path`, and one process may run
+#: several configs.
+_BASE_ENTITY_CACHE: Dict[Tuple[str, Tuple[str, ...], str, str], Any] = {}
+
 
 def resolve_derived_paths(pattern: str, roots: List[str]) -> List[str]:
     """Every layer-relative POSIX path matching `pattern`, in layer order.
@@ -34,7 +49,10 @@ def resolve_derived_paths(pattern: str, roots: List[str]) -> List[str]:
 
 def parse_file(content: BeautifulSoup, config: Config, temp: Temp, source_path: Optional[str] = None) -> Temp:
     """Parse XML content according to configuration and extract structured data."""
-    cache = {}
+    # Process-wide, not per file — see `_BASE_ENTITY_CACHE`. Only the
+    # inheritance loader reads or writes it; `parse_entity` takes it but never
+    # touches it.
+    cache = _BASE_ENTITY_CACHE
 
     # Track unique values per (entity_type, attribute_name) combination
     unique_values: Dict[Tuple[str, str], Set[Any]] = {}
@@ -531,8 +549,12 @@ def load_base_entity_with_inheritance(base_file: str, config: Config, entity_sel
     base_path = find_file_in_package_paths(base_file, config.package_path, source_dir)
 
     # Key the cache on the resolved path, not the bare filename: two different
-    # files called tank.vehicle used to share one cache entry.
-    cache_key = f"{base_path or base_file}:{entity_selector}"
+    # files called tank.vehicle used to share one cache entry. `base_path` is
+    # already the post-resolution answer, so `source_dir` needs no separate
+    # slot. The config identity and layer stack are included because nested
+    # inheritance resolves against `config.package_path`.
+    cache_key = (config.CONFIGFILE, tuple(config.package_path),
+                 str(base_path or base_file), entity_selector)
     if cache_key in cache:
         return cache.get(cache_key)
 

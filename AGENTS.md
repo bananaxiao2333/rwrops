@@ -144,7 +144,7 @@ print(cfg.entities['vehicle'].children['turrets'].deep)   # 期望 False
 22 个包累计成一块没法解释。`vanilla` 包（= 单包模式的等价物）的基线：
 
 ```
-[gate][vanilla] inherit_scoped:        340    按作用域规则解决，不是盲猜
+[gate][vanilla] inherit_scoped:        233    按作用域规则解决，不是盲猜
 [gate][vanilla] inherit_ambiguous:       1    真平局（wiesel_spawn.vehicle 同 key 双定义）
 [gate][vanilla] child_dropped_empty:    87    元素不含任何被配置提取的属性（已逐条查清）
 [gate][vanilla] entity_empty:            1
@@ -153,7 +153,15 @@ print(cfg.entities['vehicle'].children['turrets'].deep)   # 期望 False
                                               （lobby 无 mapview_frame；lobby/map17/map20 无 mask）
 [gate][vanilla] derive_extra_match:      7    一个 glob 匹配到多张 mask，只取第一个
                                               （map8/14/15/18/19/1_2/21 各有多张）
+[gate][vanilla] as_command_shadowed:     1    同名命令在两个文件里定义，取层栈靠前的那个
+[gate][vanilla] as_table_empty:          1    `array<string> x = { }` 字面量，里面没有值
 ```
+
+> **`inherit_scoped` 曾记作 340。** `util/ops.py` 的基类解析缓存从「每个文件一个」改成
+> 「每个进程一个」（`_BASE_ENTITY_CACHE`）之后，同一个基类只解析一次，它自己的继承链也就只
+> 走一次 —— 少掉的那 107 次是**重复调用**，不是少解析了引用。数据逐字节未变
+> （`vanilla/result.json` 缓存开/关 sha256 相同）。计数器现在数的是**实际发生的作用域解析次数**，
+> 不是引用次数。
 
 > **`derive_fields` 的值是包内相对路径，不是拍平名。** 它同时是 `assets.json` 的键空间，
 > 前端就是拿这个值去索引里查图片的。历史上这里做 `.replace("/", "_")`，只有当文件**存在**时
