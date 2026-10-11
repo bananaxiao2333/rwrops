@@ -41,7 +41,15 @@ echo "result.json sha256 ${A:0:16}…  (${NPKG} packages)"
 
 echo "── gate 2/4: determinism (rerun, same bytes?) ──────"
 BEFORE=$(manifest)
-run /tmp/gate_b.log
+# The exit code matters as much as the bytes: if the rerun dies before it
+# touches dist/, the manifest is trivially unchanged and this gate reports a
+# vacuous "identical" on a build that cannot even complete. Seen for real —
+# the rerun was killed by a bulk-delete guard and gate 2 still printed OK.
+if ! run /tmp/gate_b.log; then
+  echo "FAIL: rerun exited non-zero"
+  tail -30 /tmp/gate_b.log
+  exit 1
+fi
 AFTER=$(manifest)
 if [ "$BEFORE" = "$AFTER" ]; then
   echo "OK: two runs produced identical output"
