@@ -189,55 +189,67 @@ def parse_package(
 
         # ── reward pools ──────────────────────────────────────────────
         # One record per weighted table, keyed by the function that declares
-        # it. `SpawnAtNode(m_metagame, resources, "random_crate", …)` is a
-        # stage crate lottery; `GiftItemDeliveryRandomRewarder(…, rewardPasses)`
-        # is the ticket exchange. Both are the same shape, so both land here.
-        # Entities that can be won get a light pointer back to the table —
-        # deliberately not a copy of the pools, which would multiply the file
-        # by the pool size (setupIcecream alone lists 176 prizes).
+        # it, and the ONLY place a pool lives. Entities carry pointers, never
+        # a copy: the ticket exchanges used to be attached to their input item
+        # as `exchange_prizes` *and* emitted as a record, so 31 of vanilla's
+        # 36 tables were written twice with byte-identical pools. Attaching
+        # instead of referencing also scales with the pool, and
+        # `setupIcecream` alone lists 176 prizes.
+        #
+        #   reward_sources  I am a prize  — which tables can hand me out
+        #   reward_inputs   I am an input  — which tables I can trigger
+        #
+        # NB: the pool loop variable must not be called `pool` — that is the
+        # AssetPool parameter of this function, and shadowing it made every
+        # asset export fail with "'list' object has no attribute 'export'".
+        # Keyed once, up front: the XML entities are all in `temp.final` by now,
+        # and the pointers must not be able to land on the pool records this
+        # loop is about to append.
+        by_key: dict = {}
+        for entity in temp.final:
+            by_key.setdefault(entity.get("key"), entity)
+
         for entry in as_data.get("reward_pools", []):
             src = entry.get("source", "")
             group = entry.get("group", "")
-            labels = entry.get("consumer_args") or []
-            label = labels[0] if labels else ""
-            record = {
+            temp.final.append({
                 "type": "reward_pool",
-                "key": f"{group}",
+                "key": group,
                 "group": group,
+                "title": entry.get("title", group),
+                "variable": entry.get("variable", ""),
                 "consumer": entry.get("consumer", ""),
-                "label": label,
+                "label": entry.get("label", ""),
+                "input": entry.get("input", []),
                 "pools": entry.get("pools", []),
                 "_source": src,
                 "_id": f"reward_pool:{group}@{src or '?'}",
-            }
-            temp.final.append(record)
+            })
 
-            pointer = {
-                "group": group,
-                "source": src,
-                "consumer": entry.get("consumer", ""),
-                "label": label,
-            }
-            # NB: the loop variable must not be called `pool` — that is the
-            # AssetPool parameter of this function, and shadowing it made every
-            # asset export fail with "'list' object has no attribute 'export'".
+            pointer = {"group": group, "source": src}
             for prize_pool in entry.get("pools", []):
                 for prize in prize_pool:
-                    key = prize.get("key", "")
-                    if not key:
+                    entity = by_key.get(prize.get("key"))
+                    if entity is None:
                         continue
-                    for entity in temp.final:
-                        if entity.get("key") != key:
-                            continue
-                        bucket = entity.setdefault("reward_sources", [])
-                        if pointer not in bucket:
-                            bucket.append(pointer)
-                        break
+                    bucket = entity.setdefault("reward_sources", [])
+                    if pointer not in bucket:
+                        bucket.append(pointer)
+
+            for inp in entry.get("input", []):
+                entity = by_key.get(inp.get("key"))
+                if entity is None:
+                    continue
+                bucket = entity.setdefault("reward_inputs", [])
+                if pointer not in bucket:
+                    bucket.append(pointer)
 
         # ── resource lists ────────────────────────────────────────────
-        # `setup*` groups are the exchange delivery inputs, already covered by
-        # `exchange_prizes` above; the rest are standalone item lists such as
-        # the vehicle unlock pool. Only the latter become records.
+        # `setup*` groups are the ticket exchanges' delivery lists, which the
+        # `reward_pool` records above already carry as `input`; emitting them
+        # again here would be the same duplication in a new place. The rest are
+        # standalone item lists — the vehicle unlock pool, the enemy weapon
+        # unlock list — and become records.
         for entry in as_data.get("resource_lists", []):
             group = entry.get("group", "")
             if group.startswith("setup"):
@@ -309,55 +321,14 @@ def parse_package(
             })
 
         n_cmds = len(as_data.get("commands", []))
-        n_exch = len(as_data.get("exchange_categories", []))
         n_pool = len(as_data.get("reward_pools", []))
         n_list = len(as_data.get("resource_lists", []))
         n_str = len(as_data.get("string_tables", []))
         n_val = len(as_data.get("value_tables", []))
         n_mod = len(as_data.get("modules", []))
-        log.info(f"AS plugin: {n_cmds} commands, {n_exch} exchange categories, "
-                 f"{n_pool} reward pools, {n_list} resource lists, "
-                 f"{n_str} string tables, {n_val} value tables, {n_mod} modules")
-
-        # Attach exchange data: forward (this → prizes) and reverse (prize → source)
-        for cat in as_data.get("exchange_categories", []):
-            cat_name = cat.get("category", "")
-            prize_pools = cat.get("prize_pools", [])
-
-            # Forward: input items → what prizes you get
-            for inp in cat.get("input", []):
-                inp_key = inp.get("key", "")
-                if not inp_key:
-                    continue
-                for entity in temp.final:
-                    if entity.get("key") == inp_key:
-                        if "exchange_prizes" not in entity:
-                            entity["exchange_prizes"] = []
-                        entity["exchange_prizes"].append({
-                            "category": cat_name,
-                            "prize_pools": prize_pools,
-                        })
-                        break
-
-            # Reverse: prize items → which categories they come from
-            for pool_entry in prize_pools:
-                for prize in pool_entry:
-                    p_key = prize.get("key", "")
-                    if not p_key:
-                        continue
-                    for entity in temp.final:
-                        if entity.get("key") == p_key:
-                            if "exchange_sources" not in entity:
-                                entity["exchange_sources"] = []
-                            source_entry = {
-                                "category": cat_name,
-                                "input": cat.get("input", []),
-                            }
-                            # dedup by category name
-                            existing_cats = {s.get("category") for s in entity["exchange_sources"]}
-                            if cat_name not in existing_cats:
-                                entity["exchange_sources"].append(source_entry)
-                            break
+        log.info(f"AS plugin: {n_cmds} commands, {n_pool} reward pools, "
+                 f"{n_list} resource lists, {n_str} string tables, "
+                 f"{n_val} value tables, {n_mod} modules")
     except Exception as e:
         log.warning(f"AS plugin failed: {e}")
 
