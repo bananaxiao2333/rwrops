@@ -541,20 +541,36 @@ def _consumer_of(text: str, start: int, end: int, var: str) -> tuple:
     return "", []
 
 
-def parse_reward_pools(path: Path) -> list:
-    """Every weighted pool in a file, grouped by the function that declares it.
+#: `void setupXxx(...)` / `protected void setupXxx(...)` — the delivery side of a
+#: ticket exchange.
+_SETUP_FN = re.compile(r"(?:protected\s+)?void\s+(setup\w+)\s*\(")
 
-    Covers both shapes the game uses: the nested `rewardPasses` of the ticket
-    exchanges, and the flat `resources` tables that decide which special crate
-    a stage spawns.
+
+def parse_reward_pools(path: Path) -> list:
+    """Every weighted table in a file — one record per declaring function.
+
+    This replaces two extractors that described the same thing. `parse_exchanges`
+    read the `setup*()` delivery lists, `parse_reward_pools` read the
+    `ScoredResource` literals; measured on `vanilla`, **31 of 36 tables came out
+    of both, byte-identical**, so the pools were being written twice — once
+    attached to the input item and once as their own record. They are one table
+    with two optional halves:
+
+      input   the `Resource(...)` items you hand over (ticket exchanges only)
+      pools   the weighted `ScoredResource` tables you draw from
+
+    A table is identified by the function that declares it, which is the only
+    identity that covers both kinds: `setupTicketSummer` has an input and no
+    consumer to speak of, `addRandomSpecialCrates` has no input and a consumer
+    (`SpawnAtNode`, label `random_crate`).
     """
     text = _strip_comments(_read(path))
-    out: list = []
+    tables: dict = {}
 
+    # ── weighted literals ─────────────────────────────────────────────
     decls = [(m, False) for m in _SCORED_DECL_NESTED.finditer(text)]
     decls += [(m, True) for m in _SCORED_DECL_FLAT.finditer(text)]
-    # Nested declaration regex also matches inside the flat one? No — but a
-    # nested decl does not contain a flat decl, so overlaps only come from
+    # A nested decl does not contain a flat decl, so overlaps only come from
     # ordering. Sort by position and drop any decl swallowed by an earlier one.
     decls.sort(key=lambda t: t[0].start())
     consumed_until = -1
@@ -583,15 +599,44 @@ def parse_reward_pools(path: Path) -> list:
         fn, _body_start, body_end = _enclosing_function(text, m.start())
         consumer, consumer_args = _consumer_of(text, brace + len(block), body_end,
                                                m.group(1))
-        out.append({
-            "group": fn or Path(path).stem,
+        group = fn or Path(path).stem
+        tables[group] = {
+            "group": group,
+            "title": _human(group),
             "variable": m.group(1),
             "consumer": consumer,
-            "consumer_args": consumer_args,
+            "label": consumer_args[0] if consumer_args else "",
+            "input": [],
             "pools": pools,
-        })
+        }
 
-    return out
+    # ── delivery lists, folded into the same record ────────────────────
+    # A `setup*()` with no `ScoredResource` literal still has an input and is
+    # still a table (vanilla has two: the laptop and briefcase unlock lists).
+    for m in _SETUP_FN.finditer(text):
+        group = m.group(1)
+        brace = text.find('{', m.end())
+        if brace < 0:
+            continue
+        body = _match_braces(text, brace)
+        if not body:
+            continue
+        delivery = [{"key": k, "class": c} for k, c in _RES_ITEM.findall(body)]
+        if not delivery:
+            continue
+        tables.setdefault(group, {
+            "group": group,
+            "title": _human(group),
+            "variable": "",
+            "consumer": "",
+            "label": "",
+            "input": [],
+            "pools": [],
+        })["input"] = delivery
+
+    # Sorted by group so the record order is a property of the source, not of
+    # the order the two passes happened to run in.
+    return [tables[g] for g in sorted(tables)]
 
 
 # ═══════════════════════ resource list parser ═══════════════════════
@@ -758,104 +803,13 @@ def parse_module_index(path: Path) -> dict:
     }
 
 
-# ═══════════════════════ exchange parser ═══════════════════════
-
-def parse_exchanges(path: Path) -> list:
-    """Extract exchange categories (parsed but not injected as entities)."""
-    logger.debug("reading exchanges from %s", path)
-    t0 = time.monotonic()
-    text = _strip_comments(_read(path))
-    result = []
-
-    for mm in re.finditer(r'(?:protected\s+)?void\s+(setup\w+)\s*\(', text):
-        sname = mm.group(1)
-        start = mm.end()
-        brace = text.find('{', start)
-        if brace < 0:
-            continue
-        depth, end = 0, brace
-        for i in range(brace, len(text)):
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-        body = text[brace:end]
-
-        delivery = []
-        for rm in re.finditer(r'(?<!Scored)Resource\("([^"]+)"\s*,\s*"([^"]+)"\)', body):
-            delivery.append({"key": rm.group(1), "class": rm.group(2)})
-
-        pools = _extract_pools(body)
-
-        if delivery or pools:
-            cat = _human(sname)
-            result.append({
-                "category": cat,
-                "input": delivery,
-                "prize_pools": pools,
-            })
-            logger.debug("  category '%s': %d inputs, %d pools", cat, len(delivery), len(pools))
-
-    elapsed = time.monotonic() - t0
-    total_items = sum(len(c["input"]) + sum(len(p) for p in c["prize_pools"]) for c in result)
-    logger.info("parsed %d exchange categories (%d items) from %s in %.2fs",
-                len(result), total_items, path.name, elapsed)
-
-    if not result:
-        logger.warning("no exchange categories found in %s", path.name)
-
-    return result
-
-
-def _extract_pools(body: str) -> list:
-    """Extract prize pools from rewardPasses. Pools are separated by '},{' in the array literal."""
-    pools = []
-    rp_idx = body.find("rewardPasses")
-    if rp_idx < 0:
-        return pools
-    tail = body[rp_idx:]
-
-    # Find the outer array: rewardPasses = { [pool1], ..., [poolN] };
-    outer = _match_braces(tail, tail.find('{'))
-    if not outer:
-        return pools
-
-    # Split pools by '},{' — each pool is a { ... } block
-    outer_body = outer.strip().lstrip('{').rstrip('}')
-    pool_texts = _split_outer_arrays(outer_body)
-
-    for pt in pool_texts:
-        pool = _scored_items(pt)
-        if pool:
-            pools.append(pool)
-
-    return pools
-
-
 # ═══════════════════════ auto-discovery ═══════════════════════
 
-#: Filenames the game ships for the two subsystems the pipeline already wires
-#: into entities. Discovery no longer needs them — they are kept as the
-#: preferred source when several packages provide one.
+#: The one filename discovery still needs: it is the canonical command handler,
+#: so it is preferred as `command_source` when several files define commands.
+#: Nothing else is special-cased — the exchange configurator used to be listed
+#: here too, and that second pass is exactly what duplicated every prize pool.
 _COMMAND_FILENAME = "basic_command_handler.as"
-_EXCHANGE_FILENAME = "item_delivery_configurator_invasion.as"
-
-
-def _find_in_dirs(dirs: list, filename: str):
-    """Search for *filename* recursively inside each directory; return first hit."""
-    for d in dirs:
-        if not d.is_dir():
-            continue
-        try:
-            for hit in sorted(d.rglob(filename)):
-                logger.debug("found %s at %s", filename, hit)
-                return hit
-        except OSError:
-            continue
-    return None
 
 
 # ═══════════════════════ main ═══════════════════════
@@ -869,25 +823,24 @@ def run(
 
     Args:
         cmd_path:       Explicit path to a command handler. Overrides discovery.
-        exch_path:      Explicit path to an exchange configurator.
+        exch_path:      Accepted for compatibility; ignored. The exchange
+                        configurator is no longer special — it is one of the
+                        files the generic scan reads.
         search_dirs:    Package layer roots (mod-first) to scan.
 
     Returns:
-        {"commands", "exchange_categories", "reward_pools", "resource_lists",
-         "string_tables", "value_tables", "modules",
-         "command_source", "exchange_source"}
+        {"commands", "reward_pools", "resource_lists", "string_tables",
+         "value_tables", "modules", "command_source"}
     """
     t0 = time.monotonic()
     result: dict = {
         "commands": [],
-        "exchange_categories": [],
         "reward_pools": [],
         "resource_lists": [],
         "string_tables": [],
         "value_tables": [],
         "modules": [],
         "command_source": None,
-        "exchange_source": None,
     }
     dirs = [Path(d) for d in (search_dirs or [])]
 
@@ -943,25 +896,21 @@ def run(
             _collect("modules", data["module"], rel)
 
     # ── exchanges ─────────────────────────────────────────────
-    ep = exch_path
-    if not ep:
-        ep = _find_in_dirs(dirs, _EXCHANGE_FILENAME)
-    if ep and Path(ep).exists():
-        logger.info("parsing exchanges from %s", ep)
-        result["exchange_categories"] = parse_exchanges(Path(ep))
-        result["exchange_source"] = str(ep)
-    elif not ep:
-        logger.info("exchange source not found (%s) — skipping", _EXCHANGE_FILENAME)
-    else:
-        logger.warning("exchange source not found: %s", ep)
+    # Nothing to do: the ticket exchanges are `setup*()` functions holding an
+    # `array<array<ScoredResource@>>`, which the generic scan above already
+    # picked up. They used to be a second, special-cased pass over one
+    # hard-coded filename, and that is what made the pools appear twice.
+    if exch_path:
+        logger.debug("exch_path=%s ignored — exchange configurators are "
+                     "discovered like any other file", exch_path)
 
     logger.info(
-        "AS totals: %d commands, %d exchange categories, %d reward pools, "
-        "%d resource lists, %d string tables, %d value tables, %d modules, %.2fs",
-        len(result["commands"]), len(result["exchange_categories"]),
-        len(result["reward_pools"]), len(result["resource_lists"]),
-        len(result["string_tables"]), len(result["value_tables"]),
-        len(result["modules"]), time.monotonic() - t0,
+        "AS totals: %d commands, %d reward pools, %d resource lists, "
+        "%d string tables, %d value tables, %d modules, %.2fs",
+        len(result["commands"]), len(result["reward_pools"]),
+        len(result["resource_lists"]), len(result["string_tables"]),
+        len(result["value_tables"]), len(result["modules"]),
+        time.monotonic() - t0,
     )
     return result
 
@@ -969,7 +918,6 @@ def run(
 if __name__ == "__main__":
     r = run(search_dirs=["."])
     print(f"Commands:           {len(r['commands'])}")
-    print(f"Exchange categories:{len(r['exchange_categories'])}")
     print(f"Reward pools:       {len(r['reward_pools'])}")
     print(f"Resource lists:     {len(r['resource_lists'])}")
     print(f"String tables:      {len(r['string_tables'])}")
